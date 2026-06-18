@@ -1,0 +1,34 @@
+# Rule-based trend + momentum strategy. One engine runs any config.
+# Money/risk thresholds live HERE, not in code.
+
+name: trend_momentum
+version: 1
+universe: wig20
+
+# Entry: long when close > SMA200 AND 6M momentum > 0.
+entry:
+  all:
+    - feature: close_vs_sma200   # (close / sma200 - 1)
+      op: gt
+      value: 0.0
+    - feature: momentum_6m
+      op: gt
+      value: 0.0
+
+# Exit: ATR trailing stop OR trend break (close < SMA200).
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: close_vs_sma200
+      op: lt
+      value: 0.0
+
+risk:
+  risk_per_trade: 0.01            # fixed-fractional: risk 1% of equity per trade
+  atr_mult_stop: 2.5             # stop distance = atr_mult * ATR
+  max_open_positions: 8
+  max_exposure_per_name: 0.20    # <= 20% of equity in one name
+  max_exposure_per_sector: 0.40  # <= 40% of equity in one sector
+  max_total_exposure: 1.0        # fully invested at most (no leverage)
+  drawdown_circuit_breaker: 0.25 # halt NEW entries while drawdown > 25%

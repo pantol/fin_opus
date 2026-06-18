@@ -1,0 +1,38 @@
+# GPW universe. Anti-survivorship: includes delisted/dead tickers.
+# Stooq symbols (lowercase). Indices use Stooq index codes.
+# market: GPW. sector kept coarse for Phase 0+1 exposure limits.
+
+benchmark:
+  ticker: wig20tr        # WIG20 Total Return (dividends reinvested)
+  name: WIG20 Total Return
+  is_index: true
+
+indices:
+  - ticker: wig
+    name: WIG
+    is_index: true
+  - ticker: wig20
+    name: WIG20
+    is_index: true
+
+instruments:
+  # --- active WIG20 members (representative subset) ---
+  - { ticker: pko,  name: PKO BP,        sector: banking,    listed_from: 2004-11-10 }
+  - { ticker: peo,  name: Pekao,         sector: banking,    listed_from: 1998-06-30 }
+  - { ticker: pkn,  name: PKN Orlen,     sector: energy,     listed_from: 1999-11-26 }
+  - { ticker: pzu,  name: PZU,           sector: insurance,  listed_from: 2010-05-12 }
+  - { ticker: kgh,  name: KGHM,          sector: materials,  listed_from: 1997-07-10 }
+  - { ticker: dnp,  name: Dino Polska,   sector: retail,     listed_from: 2017-04-11 }
+  - { ticker: cdr,  name: CD Projekt,    sector: technology, listed_from: 2010-12-22 }
+  - { ticker: ccc,  name: CCC,           sector: retail,     listed_from: 2004-12-02 }
+  - { ticker: alr,  name: Alior Bank,    sector: banking,    listed_from: 2012-12-14 }
+  - { ticker: spl,  name: Santander BP,  sector: banking,    listed_from: 2001-06-25 }
+  - { ticker: lpp,  name: LPP,           sector: retail,     listed_from: 2001-05-16 }
+  - { ticker: opl,  name: Orange Polska, sector: telecom,    listed_from: 1998-11-18 }
+
+  # --- delisted / dead tickers (anti-survivorship) ---
+  - { ticker: gtc,  name: GTC,                sector: real_estate, listed_from: 2004-05-06, delisted_on: 2023-11-30 }
+  - { ticker: brs,  name: Boryszew,           sector: materials,   listed_from: 1996-01-15, delisted_on: 2022-12-31 }
+  - { ticker: gnb,  name: Getin Noble Bank,   sector: banking,     listed_from: 2008-01-02, delisted_on: 2023-10-02 }
+  - { ticker: ple,  name: Petrolinvest,       sector: energy,      listed_from: 2007-07-31, delisted_on: 2018-06-30 }
+  - { ticker: bph,  name: BPH,                sector: banking,     listed_from: 1995-01-24, delisted_on: 2016-11-04 }

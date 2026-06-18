@@ -1,0 +1,20 @@
+# Realistic-cost + walk-forward configuration. All money logic is deterministic.
+
+initial_capital: 100000.0   # PLN
+seed: 42                     # reproducibility
+user_id: default            # multi-tenant seam (single user for now)
+
+costs:
+  commission_bps: 38.0          # ~0.38% GPW retail per side
+  commission_min: 3.0           # PLN minimum per trade
+  spread_bps: 20.0              # half applied each side (buy at ask, sell at bid)
+  slippage_bps: 10.0           # base slippage per side
+  max_volume_participation: 0.10  # cannot trade > 10% of the day's volume
+
+walk_forward:
+  in_sample_months: 24
+  out_sample_months: 6
+  benchmark: wig20tr            # never SPY
+
+execution:
+  signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)

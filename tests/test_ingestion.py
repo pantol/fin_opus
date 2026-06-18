@@ -1,0 +1,61 @@
+"""Ingestion tests: parsing, storage, point-in-time as_of_date, anti-survivorship."""
+from app.ingestion import stooq
+
+from tests.conftest import make_stooq_csv
+
+
+def test_parse_csv_basic():
+    csv_text = make_stooq_csv(
+        [
+            ("2020-01-02", 10.0, 10.5, 9.8, 10.2, 1000),
+            ("2020-01-03", 10.2, 10.6, 10.0, 10.4, 1200),
+        ]
+    )
+    bars = stooq.parse_csv(csv_text)
+    assert len(bars) == 2
+    assert bars[0].date == "2020-01-02"
+    # EOD bar is available only after that day's close.
+    assert bars[0].as_of_date == bars[0].date
+    assert bars[1].close == 10.4
+
+
+def test_parse_csv_skips_non_numeric_rows():
+    csv_text = "Data,Otwarcie,Najwyzszy,Najnizszy,Zamkniecie,Wolumen\n2020-01-02,N/D,N/D,N/D,N/D,N/D"
+    assert stooq.parse_csv(csv_text) == []
+
+
+def test_ingest_universe_with_injected_fetcher_no_network(conn):
+    universe = {
+        "benchmark": {"ticker": "wig20tr", "name": "WIG20TR", "is_index": True},
+        "indices": [{"ticker": "wig", "name": "WIG", "is_index": True}],
+        "instruments": [
+            {"ticker": "pko", "name": "PKO", "sector": "banking", "listed_from": "2004-11-10"},
+            {"ticker": "ple", "name": "Petrolinvest", "sector": "energy",
+             "listed_from": "2007-07-31", "delisted_on": "2018-06-30"},
+        ],
+    }
+
+    def fake_fetch(ticker):
+        return make_stooq_csv([("2020-01-02", 10.0, 10.5, 9.8, 10.2, 1000)])
+
+    counts = stooq.ingest_universe(conn, universe, fetcher=fake_fetch)
+    assert counts["pko"] == 1
+
+    # Anti-survivorship: delisted ticker stored with delisted_on.
+    row = conn.execute(
+        "SELECT delisted_on FROM instruments WHERE ticker='ple'"
+    ).fetchone()
+    assert row["delisted_on"] == "2018-06-30"
+
+    # Raw prices flagged adjusted=0.
+    n_raw = conn.execute("SELECT COUNT(*) FROM prices WHERE adjusted=0").fetchone()[0]
+    assert n_raw == 4  # wig20tr + wig + pko + ple
+
+
+def test_store_bars_is_idempotent(conn):
+    inst_id = stooq.upsert_instrument(conn, {"ticker": "tst", "name": "Test"})
+    bars = stooq.parse_csv(make_stooq_csv([("2020-01-02", 10, 11, 9, 10, 500)]))
+    stooq.store_bars(conn, inst_id, bars)
+    stooq.store_bars(conn, inst_id, bars)  # again
+    n = conn.execute("SELECT COUNT(*) FROM prices WHERE instrument_id=?", (inst_id,)).fetchone()[0]
+    assert n == 1

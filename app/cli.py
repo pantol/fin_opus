@@ -76,8 +76,9 @@ def cmd_backtest(args) -> int:
     bt_cfg = cfg.load_backtest_config()
     strat = cfg.load_strategy(args.strategy)
 
-    declog.register_strategy(conn, strat["name"], int(strat["version"]),
-                             yaml.safe_dump(strat))
+    strategy_id = declog.register_strategy(
+        conn, strat["name"], int(strat["version"]), yaml.safe_dump(strat)
+    )
 
     bench = universe["benchmark"]["ticker"]
     instruments, bench_close = engine.load_instruments(conn, universe, bench)
@@ -89,18 +90,19 @@ def cmd_backtest(args) -> int:
           f"(strategy: {strat['name']} v{strat['version']})...")
     result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg)
 
-    _persist_results(conn, bt_cfg["user_id"], result)
+    _persist_results(conn, bt_cfg["user_id"], result, strategy_id=strategy_id,
+                     params=strat)
     _print_metrics_table(result, bt_cfg["walk_forward"]["benchmark"])
     conn.close()
     return 0
 
 
-def _persist_results(conn, user_id: str, result) -> None:
+def _persist_results(conn, user_id: str, result, *, strategy_id=None, params=None) -> None:
     for d in result.decisions:
         dec_id = declog.log_decision(
-            conn, user_id=user_id, strategy_id=None, instrument_id=d["instrument_id"],
+            conn, user_id=user_id, strategy_id=strategy_id, instrument_id=d["instrument_id"],
             decision_date=d["decision_date"], action=d["action"],
-            features=d.get("features", {}),
+            features=d.get("features", {}), params=params,
         )
         declog.log_trade(
             conn, user_id=user_id, instrument_id=d["instrument_id"],
@@ -108,9 +110,13 @@ def _persist_results(conn, user_id: str, result) -> None:
             qty=d["qty"], price=d["price"], fee=d["fee"], slippage=d["slippage"],
             trade_date=d["fill_date"], decision_id=dec_id,
         )
+    cash_curve = result.cash_curve
+    exposure_curve = result.exposure_curve
     for date, equity in result.equity_curve.items():
+        cash = float(cash_curve.get(date, 0.0)) if not cash_curve.empty else 0.0
+        exposure = float(exposure_curve.get(date, 0.0)) if not exposure_curve.empty else 0.0
         declog.record_equity(conn, user_id=user_id, date=date.date().isoformat(),
-                             equity=float(equity), cash=0.0, exposure=0.0)
+                             equity=float(equity), cash=cash, exposure=exposure)
     conn.commit()
 
 

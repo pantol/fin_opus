@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>GPW ESPI - Raporty biezace i okresowe</title>
+    <link>https://www.gpw.pl/komunikaty</link>
+    <description>Raporty ESPI emitentow GPW</description>
+    <language>pl-pl</language>
+    <atom:link href="https://www.gpw.pl/_rss_espi" rel="self" type="application/rss+xml"/>
+    <item>
+      <title><![CDATA[PKO BANK POLSKI SA (12/2024) Powolanie czlonka Zarzadu Banku]]></title>
+      <link>https://www.gpw.pl/komunikat?geru_id=512345&amp;title=PKO</link>
+      <guid isPermaLink="false">espi-512345</guid>
+      <pubDate>Mon, 06 May 2024 17:32:00 +0200</pubDate>
+      <dc:date>2024-05-06T17:32:00+02:00</dc:date>
+      <description><![CDATA[Zarzad PKO Banku Polskiego S.A. informuje o powolaniu czlonka Zarzadu.]]></description>
+    </item>
+    <item>
+      <title><![CDATA[KGHM POLSKA MIEDZ SA (33/2024) Wstepne wyniki produkcyjne za kwiecien 2024]]></title>
+      <link>https://www.gpw.pl/komunikat?geru_id=512400&amp;title=KGHM</link>
+      <guid isPermaLink="false">espi-512400</guid>
+      <pubDate>Tue, 07 May 2024 08:01:00 +0200</pubDate>
+      <dc:date>2024-05-07T08:01:00+02:00</dc:date>
+      <description><![CDATA[KGHM Polska Miedz S.A. przekazuje wstepne dane produkcyjne.]]></description>
+    </item>
+    <item>
+      <title><![CDATA[ORANGE POLSKA SA (15/2024) Zawarcie znaczacej umowy]]></title>
+      <link>https://www.gpw.pl/komunikat?geru_id=512455&amp;title=OPL</link>
+      <guid isPermaLink="false">espi-512455</guid>
+      <pubDate>Wed, 08 May 2024 12:15:00 +0200</pubDate>
+      <dc:date>2024-05-08T12:15:00+02:00</dc:date>
+      <description><![CDATA[Orange Polska S.A. informuje o zawarciu umowy o istotnej wartosci.]]></description>
+    </item>
+  </channel>
+</rss>

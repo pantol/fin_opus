@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
 from app.db import connect, init_db
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
+FEEDS_DIR = FIXTURES_DIR / "feeds"
 
 
 @pytest.fixture
@@ -14,6 +18,16 @@ def conn():
     init_db(c)
     yield c
     c.close()
+
+
+def load_feed_fixture(name: str) -> str:
+    """Read a saved real-shape RSS/Atom feed sample from tests/fixtures/feeds."""
+    return (FEEDS_DIR / name).read_text(encoding="utf-8")
+
+
+@pytest.fixture
+def feeds_dir() -> Path:
+    return FEEDS_DIR
 
 
 def make_stooq_csv(rows: list[tuple[str, float, float, float, float, float]]) -> str:

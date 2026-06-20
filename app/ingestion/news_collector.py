@@ -47,6 +47,18 @@ _ESPI_RE = re.compile(r"\bESPI\b", re.IGNORECASE)
 _EBI_RE = re.compile(r"\bEBI\b", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 
+# GPW/ESPI RSS titles frequently lead with the issuer, e.g.
+#   "PKO BANK POLSKI SA (12/2024) Tytuł raportu"
+# Capture the issuer name as everything before the first "(report/year)" group.
+_ISSUER_BEFORE_PAREN_RE = re.compile(r"^\s*(.+?)\s*\(\s*\d{1,4}\s*/\s*\d{4}\s*\)")
+# Common Polish report-prefix noise to strip when no leading-issuer pattern is
+# present (so the issuer name does not start with "Raport ESPI nr 12/2024 ...").
+_REPORT_PREFIX_RE = re.compile(
+    r"^\s*(raport\s+(biezacy|okresowy|espi|ebi)?\s*(nr\.?)?\s*"
+    r"\d{0,4}\s*/?\s*\d{0,4}|espi|ebi)\b[\s:–\-]*",
+    re.IGNORECASE,
+)
+
 _PLACEHOLDER_PREFIX = "PLACEHOLDER_"
 
 
@@ -134,6 +146,29 @@ def extract_report_number(*texts: str | None) -> str | None:
         if m:
             return re.sub(r"\s*", "", m.group(1))
     return None
+
+
+def extract_issuer_name(title: str | None) -> str | None:
+    """Best-effort issuer name from an ESPI/EBI headline.
+
+    GPW titles usually lead with the issuer before the "(report/year)" group,
+    e.g. "PKO BANK POLSKI SA (12/2024) ...". When that pattern is absent, strip
+    a leading Polish report prefix ("Raport ESPI nr 12/2024 ...") and any inline
+    ISIN, returning the remaining leading text. Used only as a fallback mapping
+    key (the resolver is conservative — unique exact normalized match only), so a
+    rough name is safe: a non-match simply leaves instrument_id null.
+    """
+    if not title:
+        return None
+    t = title.strip()
+    m = _ISSUER_BEFORE_PAREN_RE.match(t)
+    if m:
+        name = m.group(1)
+    else:
+        name = _REPORT_PREFIX_RE.sub("", t)
+        name = _ISIN_RE.sub("", name).strip()
+    name = name.strip(" -–:|")
+    return name or None
 
 
 def detect_type(default_type: str | None, *texts: str | None) -> str | None:
@@ -252,7 +287,7 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
             "_instant": datetime.fromisoformat(published_at).astimezone(timezone.utc),
             "espi_ebi_type": detect_type(default_type, title, summary),
             "issuer_isin": extract_isin(title, summary),
-            "issuer_name": title,  # best-effort; refined later by the LLM phase
+            "issuer_name": extract_issuer_name(title) or title,
             "report_number": extract_report_number(title, summary),
             "content_hash": chash,
             "dedup_key": dedup_key_for(entry, chash),
@@ -385,7 +420,9 @@ def _store_items(conn, items, *, want_full_text, fetch_full_text, user_agent, ti
                 )
                 continue
 
-        instrument_id = filings_db.resolve_instrument_id(conn, it["issuer_isin"])
+        instrument_id = filings_db.resolve_instrument_id(
+            conn, it["issuer_isin"], it["issuer_name"]
+        )
         full_text = ""
         if want_full_text and it.get("url"):
             full_text = fetch_full_text(it["url"], user_agent=user_agent, timeout=timeout)

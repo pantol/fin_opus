@@ -15,6 +15,7 @@ ZERO LLM here — pure SQL plumbing.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -92,22 +93,76 @@ def find_by_report_key(
     ).fetchone()
 
 
-def resolve_instrument_id(conn: sqlite3.Connection, issuer_isin: str | None) -> int | None:
-    """Map an ISIN to instruments(id) if the table + a matching row exist.
+# Corporate-form / legal-suffix noise to drop before name matching. Polish +
+# common international forms. Matching is exact on the normalized core, so a
+# filing for "PKO BANK POLSKI SA" maps to an instrument named "PKO BP" only if
+# the configured instrument name normalizes to the same core — we deliberately
+# keep it conservative (exact normalized match) to avoid false positives.
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(spolka akcyjna|s\.?\s*a\.?|sa|spzoo|sp\.?\s*z\.?\s*o\.?\s*o\.?|"
+    r"plc|inc|ltd|gmbh|ag|nv|se|asa|oyj)\b",
+    re.IGNORECASE,
+)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
-    Returns None when the instruments table is absent (collector runs alone) or
-    no instrument carries this ISIN — the filing is still stored, resolvable
-    later once the instrument is known.
+
+def normalize_name(name: str | None) -> str:
+    """Normalize an issuer/instrument name for conservative exact matching.
+
+    Lowercases, strips Polish diacritics, removes legal-form suffixes (SA, sp.
+    z o.o., ...) and all non-alphanumerics. Empty string if nothing remains.
     """
-    if not issuer_isin:
+    if not name:
+        return ""
+    s = name.lower()
+    # strip Polish diacritics (deterministic, no external dep)
+    trans = str.maketrans("ąćęłńóśźż", "acelnoszz")
+    s = s.translate(trans)
+    s = _LEGAL_SUFFIX_RE.sub(" ", s)
+    s = _NON_ALNUM_RE.sub("", s)
+    return s
+
+
+def resolve_by_name(conn: sqlite3.Connection, issuer_name: str | None) -> int | None:
+    """Map a normalized issuer name to instruments(id), or None.
+
+    Fallback for filings without a (resolvable) ISIN. Conservative: matches only
+    when the normalized issuer name EQUALS a normalized instrument name, and only
+    when that match is UNIQUE (no ambiguous multi-hit). Never guesses.
+    """
+    key = normalize_name(issuer_name)
+    if not key:
         return None
     try:
-        row = conn.execute(
-            "SELECT id FROM instruments WHERE isin = ? LIMIT 1", (issuer_isin,)
-        ).fetchone()
+        rows = conn.execute("SELECT id, name FROM instruments").fetchall()
     except sqlite3.OperationalError:
         return None  # no instruments table yet
-    return int(row[0]) if row else None
+    hits = [int(r[0]) for r in rows if normalize_name(r[1]) == key]
+    return hits[0] if len(hits) == 1 else None
+
+
+def resolve_instrument_id(
+    conn: sqlite3.Connection,
+    issuer_isin: str | None,
+    issuer_name: str | None = None,
+) -> int | None:
+    """Map a filing to instruments(id): ISIN first, issuer name as fallback.
+
+    Returns None when the instruments table is absent (collector runs alone) or
+    nothing matches — the filing is still stored, resolvable later once the
+    instrument is known. ISIN is authoritative; the name fallback is only used
+    when ISIN is missing/unresolved, and only on a unique exact normalized match.
+    """
+    if issuer_isin:
+        try:
+            row = conn.execute(
+                "SELECT id FROM instruments WHERE isin = ? LIMIT 1", (issuer_isin,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None  # no instruments table yet
+        if row:
+            return int(row[0])
+    return resolve_by_name(conn, issuer_name)
 
 
 def insert_filing(conn: sqlite3.Connection, item: dict) -> bool:

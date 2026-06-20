@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>GPW ESPI (Atom)</title>
+  <link href="https://www.gpw.pl/_atom_espi" rel="self"/>
+  <updated>2024-05-06T17:32:00+02:00</updated>
+  <id>urn:gpw:espi:atom</id>
+  <entry>
+    <title>CD PROJEKT SA (8/2024) Rejestracja zmian statutu Spolki</title>
+    <link href="https://www.gpw.pl/komunikat?geru_id=600001"/>
+    <id>espi-atom-600001</id>
+    <updated>2024-05-06T11:00:00+02:00</updated>
+    <published>2024-05-06T11:00:00+02:00</published>
+    <summary>CD PROJEKT S.A. informuje o rejestracji zmian statutu.</summary>
+  </entry>
+</feed>

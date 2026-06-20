@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Bankier.pl - Komunikaty spolek</title>
+    <link>https://www.bankier.pl/wiadomosc</link>
+    <description>Agregator komunikatow ESPI/EBI</description>
+    <language>pl-PL</language>
+    <item>
+      <title>PKO BP: Powolanie czlonka Zarzadu Banku (ESPI 12/2024)</title>
+      <link>https://www.bankier.pl/wiadomosc/PKO-BP-12-2024-7891011.html</link>
+      <guid>bankier-7891011</guid>
+      <pubDate>Mon, 06 May 2024 18:05:00 +0200</pubDate>
+      <description>PKO Bank Polski (PLPKO0000016) - raport biezacy ESPI nr 12/2024.</description>
+    </item>
+    <item>
+      <title>Komunikat: PKN ORLEN przejecie aktywow - raport ESPI 41/2024</title>
+      <link>https://www.bankier.pl/wiadomosc/Orlen-41-2024-7891099.html</link>
+      <guid>bankier-7891099</guid>
+      <pubDate>Wed, 08 May 2024 19:00:00 +0200</pubDate>
+      <description>PKN Orlen (PLPKN0000018) - raport biezacy ESPI nr 41/2024.</description>
+    </item>
+  </channel>
+</rss>

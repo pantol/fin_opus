@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>NewConnect EBI - komunikaty</title>
+    <link>https://newconnect.pl/komunikaty</link>
+    <description>Raporty EBI emitentow NewConnect</description>
+    <language>pl-pl</language>
+    <item>
+      <title>Raport EBI nr 4/2024 - SOME SMALLCAP S.A. - Zmiana terminu publikacji raportu rocznego</title>
+      <link>https://newconnect.pl/komunikat/445566</link>
+      <guid>nc-ebi-445566</guid>
+      <pubDate>Mon, 06 May 2024 09:45:00 CEST</pubDate>
+      <description>Zarzad SOME SMALLCAP S.A. informuje o zmianie terminu publikacji.</description>
+    </item>
+    <item>
+      <title>Raport EBI nr 5/2024 - TINY TECH SA - Powolanie Rady Nadzorczej</title>
+      <link>https://newconnect.pl/komunikat/445588</link>
+      <guid>nc-ebi-445588</guid>
+      <pubDate>Tue, 07 May 2024 14:20:00 CEST</pubDate>
+      <description>Powolanie czlonkow Rady Nadzorczej spolki.</description>
+    </item>
+  </channel>
+</rss>

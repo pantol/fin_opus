@@ -41,13 +41,24 @@ def run_once(config: dict | None = None) -> int:
     conn = connect(_db_path(config))
     try:
         filings_db.ensure_schema(conn)
+        log = logging.getLogger("news_collector")
         try:
             stats = news_collector.run_cycle(conn, config)
         except Exception as exc:  # noqa: BLE001 - record health, then surface
             filings_db.mark_run_error(conn, str(exc))
-            logging.getLogger("news_collector").exception("cycle crashed")
+            log.exception("cycle crashed")
             return 1
-        return 0 if stats.feeds_failed == 0 else 0  # partial failures are non-fatal
+        # Non-zero on an unhealthy cycle so VPS cron/monitoring detects a degraded
+        # collector (a feed down, or a feed still left as a placeholder URL) even
+        # though the process did not crash.
+        if not stats.healthy:
+            log.error(
+                "unhealthy cycle: %d/%d feeds polled, %d failed, %d skipped",
+                stats.feeds_polled, stats.feeds_configured,
+                stats.feeds_failed, stats.feeds_skipped,
+            )
+            return 2
+        return 0
     finally:
         conn.close()
 

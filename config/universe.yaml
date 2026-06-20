@@ -17,18 +17,19 @@ indices:
 
 instruments:
   # --- active WIG20 members (representative subset) ---
-  - { ticker: pko,  name: PKO BP,        sector: banking,    listed_from: 2004-11-10 }
-  - { ticker: peo,  name: Pekao,         sector: banking,    listed_from: 1998-06-30 }
-  - { ticker: pkn,  name: PKN Orlen,     sector: energy,     listed_from: 1999-11-26 }
-  - { ticker: pzu,  name: PZU,           sector: insurance,  listed_from: 2010-05-12 }
-  - { ticker: kgh,  name: KGHM,          sector: materials,  listed_from: 1997-07-10 }
-  - { ticker: dnp,  name: Dino Polska,   sector: retail,     listed_from: 2017-04-11 }
-  - { ticker: cdr,  name: CD Projekt,    sector: technology, listed_from: 2010-12-22 }
-  - { ticker: ccc,  name: CCC,           sector: retail,     listed_from: 2004-12-02 }
-  - { ticker: alr,  name: Alior Bank,    sector: banking,    listed_from: 2012-12-14 }
-  - { ticker: spl,  name: Santander BP,  sector: banking,    listed_from: 2001-06-25 }
-  - { ticker: lpp,  name: LPP,           sector: retail,     listed_from: 2001-05-16 }
-  - { ticker: opl,  name: Orange Polska, sector: telecom,    listed_from: 1998-11-18 }
+  # isin = ISO 6166; the join key for ESPI/EBI filings -> instruments.
+  - { ticker: pko,  name: PKO BP,        sector: banking,    isin: PLPKO0000016, listed_from: 2004-11-10 }
+  - { ticker: peo,  name: Pekao,         sector: banking,    isin: PLPEKAO00016, listed_from: 1998-06-30 }
+  - { ticker: pkn,  name: PKN Orlen,     sector: energy,     isin: PLPKN0000018, listed_from: 1999-11-26 }
+  - { ticker: pzu,  name: PZU,           sector: insurance,  isin: PLPZU0000011, listed_from: 2010-05-12 }
+  - { ticker: kgh,  name: KGHM,          sector: materials,  isin: PLKGHM000017, listed_from: 1997-07-10 }
+  - { ticker: dnp,  name: Dino Polska,   sector: retail,     isin: PLDINPL00011, listed_from: 2017-04-11 }
+  - { ticker: cdr,  name: CD Projekt,    sector: technology, isin: PLOPTTC00011, listed_from: 2010-12-22 }
+  - { ticker: ccc,  name: CCC,           sector: retail,     isin: PLCCC0000016, listed_from: 2004-12-02 }
+  - { ticker: alr,  name: Alior Bank,    sector: banking,    isin: PLALIOR00045, listed_from: 2012-12-14 }
+  - { ticker: spl,  name: Santander BP,  sector: banking,    isin: PLBZ00000044, listed_from: 2001-06-25 }
+  - { ticker: lpp,  name: LPP,           sector: retail,     isin: PLLPP0000011, listed_from: 2001-05-16 }
+  - { ticker: opl,  name: Orange Polska, sector: telecom,    isin: PLTLKPL00017, listed_from: 1998-11-18 }
 
   # --- delisted / dead tickers (anti-survivorship) ---
   - { ticker: gtc,  name: GTC,                sector: real_estate, listed_from: 2004-05-06, delisted_on: 2023-11-30 }

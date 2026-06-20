@@ -5,7 +5,7 @@
 
 **Current phase:** Phase 0+1 (deterministic core, no LLM) — **COMPLETE & green.**
 Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM).
-**Tests:** 68 passing.
+**Tests:** 78 passing.
 
 ---
 
@@ -47,7 +47,7 @@ Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM
 - [x] **Collector core** (`app/ingestion/news_collector.py`) — fetch RSS (feedparser), parse, ISIN/report/type extraction, full-text fetch, two-layer dedup, per-feed resilience.
 - [x] **Entrypoints** (`app/ingestion/collect_news.py`) — one-shot + APScheduler `--loop`; `make collect` / `make collect-loop`.
 - [x] **ISIN seam** — nullable `isin` on `instruments` (idempotent `ALTER TABLE` migration in `app/db.py`).
-- [x] **Tests** (`tests/test_news_collector.py`) — dedup, idempotency, point-in-time/tz, ISIN mapping, resilience (8 tests).
+- [x] **Tests** (`tests/test_news_collector.py`) — dedup (incl. earliest-wins regardless of feed order), idempotency, point-in-time/tz, ISIN mapping, resilience, health/exit-code, timestamp formats (18 tests).
 - [x] **VPS deploy docs** — README cron + systemd + health verification.
 
 ## Invariants (enforced by tests)
@@ -63,6 +63,23 @@ Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM
 ---
 
 ## Changelog (newest first)
+
+### 2026-06-20 — Collector review fixes (dedup order, health, ISIN, timestamps)
+Code-review hardening of the collector. 78 tests green; ISIN seam verified
+end-to-end (universe → stooq → `instruments.isin`).
+- High: cross-source dedup now collects candidates from ALL feeds, sorts
+  GLOBALLY by true publication instant, then stores — earliest-published wins
+  regardless of feed order in the config (not first-feed-in-config).
+- High: health beacon marks success ONLY on a genuinely healthy cycle (every
+  configured feed polled OK; none failed/skipped); failed/placeholder feeds
+  record an error. `run_once` now returns non-zero on an unhealthy cycle so VPS
+  cron/monitoring detects a degraded collector that did not crash.
+- Med: real ISINs added to active members in `config/universe.yaml` so ISIN →
+  `instrument_id` resolution actually works; stooq persists `isin`.
+- Med: `parse_published_at`/`parse_datetime` rewritten — authoritative parsing of
+  the raw pubDate (feedparser leaves CET/CEST unconverted, drops no-offset
+  dates). Handles RFC numeric-offset / no-offset / GMT / CET / CEST and ISO
+  naive/offset; naive → Europe/Warsaw. New tests for each format.
 
 ### 2026-06-20 — ESPI/EBI + news collector (standalone, ZERO LLM)
 New, independently runnable RSS collector writing append-only into `filings` in

@@ -16,7 +16,8 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -27,6 +28,16 @@ from app.ingestion import filings_db
 logger = logging.getLogger("news_collector")
 
 WARSAW = ZoneInfo("Europe/Warsaw")
+
+# Named timezone abbreviations that appear in Polish/EU feeds. feedparser does
+# NOT reliably convert these (it leaves CET/CEST wall-clock untouched), so we
+# resolve them explicitly to fixed offsets when parsing the raw pubDate string.
+_TZ_ABBREV = {
+    "UTC": timezone.utc, "GMT": timezone.utc, "Z": timezone.utc,
+    "CET": timezone(timedelta(hours=1)),
+    "CEST": timezone(timedelta(hours=2)),
+}
+_TRAILING_ABBREV_RE = re.compile(r"\b(UTC|GMT|CET|CEST)\b\s*$", re.IGNORECASE)
 
 # ISIN: 2-letter country code + 9 alphanumerics + 1 check digit.
 _ISIN_RE = re.compile(r"\b([A-Z]{2}[A-Z0-9]{9}[0-9])\b")
@@ -42,11 +53,28 @@ _PLACEHOLDER_PREFIX = "PLACEHOLDER_"
 @dataclass
 class CycleStats:
     """Per-cycle summary for structured logging + health."""
-    feeds_polled: int = 0
-    feeds_failed: int = 0
+    feeds_configured: int = 0     # enabled feeds in config
+    feeds_polled: int = 0         # fetched + parsed successfully
+    feeds_failed: int = 0         # raised during fetch/parse
+    feeds_skipped: int = 0        # placeholder / missing URL
     items_seen: int = 0
     new_items: int = 0
     errors: list[str] = field(default_factory=list)
+
+    @property
+    def healthy(self) -> bool:
+        """A cycle is healthy only if every configured feed was polled OK.
+
+        Any failed OR skipped (placeholder) feed makes the cycle unhealthy, so
+        VPS monitoring can alert instead of trusting a green `last_successful_run`
+        produced by a collector that actually fetched nothing.
+        """
+        return (
+            self.feeds_configured > 0
+            and self.feeds_failed == 0
+            and self.feeds_skipped == 0
+            and self.feeds_polled == self.feeds_configured
+        )
 
 
 # --- network seams (injectable in tests) -------------------------------------
@@ -118,31 +146,64 @@ def detect_type(default_type: str | None, *texts: str | None) -> str | None:
     return default_type
 
 
-def parse_published_at(entry) -> str:
-    """Return a tz-aware ISO timestamp for the item's publication moment.
+def parse_datetime(raw: str) -> datetime:
+    """Parse a feed pubDate string into a tz-AWARE datetime, normalized to Warsaw.
 
-    Feeds expose pubDate; feedparser parses it into `published_parsed` (a UTC
-    struct_time). We treat a naive feed wall-clock as Europe/Warsaw per the
-    Polish sources, but if feedparser already resolved an explicit offset we
-    honour that instant. NEVER derived from fetch time.
+    Handles, authoritatively (we do NOT trust feedparser's struct_time, which
+    leaves CET/CEST wall-clock unconverted):
+      - RFC-822 with numeric offset:  "Mon, 06 May 2024 09:00:00 +0200"
+      - RFC-822 with GMT/UTC:         "... 09:00:00 GMT"
+      - RFC-822 with CET/CEST names:  "... 09:00:00 CET" / "... CEST"
+      - RFC-822 with NO offset:       "Mon, 06 May 2024 09:00:00"  -> Warsaw
+      - ISO-8601 with offset:         "2024-01-02T09:15:00+01:00"
+      - ISO-8601 naive:               "2024-05-06T09:00:00"        -> Warsaw
+
+    A naive timestamp (no offset/zone) is interpreted as Europe/Warsaw local
+    time, which is the convention of the Polish sources. Never UTC-by-default.
     """
-    # feedparser sets *_parsed to a UTC time.struct_time when an offset/zone is
-    # present in the source; use it as the authoritative instant.
-    tm = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
-    if tm is not None:
-        dt_utc = datetime(*tm[:6], tzinfo=timezone.utc)
-        # Express in Warsaw local time (explicit tz) for storage/readability.
-        return dt_utc.astimezone(WARSAW).isoformat()
-    # Fallback: parse the raw string as a Warsaw-local naive datetime.
+    s = raw.strip()
+
+    # ISO-8601 first (RFC parser would reject it).
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return _as_warsaw(dt)
+    except ValueError:
+        pass
+
+    # Named-abbreviation zones the RFC parser can't resolve (CET/CEST) or maps
+    # to a naive datetime (GMT handled by parser, but be explicit/robust).
+    m = _TRAILING_ABBREV_RE.search(s)
+    if m:
+        tz = _TZ_ABBREV[m.group(1).upper()]
+        base = s[: m.start()].strip()
+        dt = parsedate_to_datetime(base)  # naive (offset stripped with the name)
+        dt = dt.replace(tzinfo=tz)
+        return _as_warsaw(dt)
+
+    # RFC-822 with a numeric offset, or no offset at all.
+    dt = parsedate_to_datetime(s)  # raises ValueError/TypeError on garbage
+    return _as_warsaw(dt)
+
+
+def _as_warsaw(dt: datetime) -> datetime:
+    """Attach Warsaw tz to a naive datetime; convert aware ones to Warsaw."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=WARSAW)
+    return dt.astimezone(WARSAW)
+
+
+def parse_published_at(entry) -> str:
+    """Return a tz-aware ISO timestamp (Warsaw) for the item's publication moment.
+
+    Parsed from the raw feed pubDate/updated string (the point-in-time anchor),
+    NEVER derived from fetch time.
+    """
     raw = getattr(entry, "published", None) or getattr(entry, "updated", None)
     if raw:
         try:
-            dt = datetime.fromisoformat(raw)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=WARSAW)
-            return dt.astimezone(WARSAW).isoformat()
-        except ValueError:
-            pass
+            return parse_datetime(raw).isoformat()
+        except (ValueError, TypeError):
+            logger.warning("unparseable pubDate %r", raw)
     raise ValueError("entry has no parseable pubDate (cannot anchor point-in-time)")
 
 
@@ -162,9 +223,10 @@ def _entry_text(entry) -> str:
 def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
     """Parse one feed's raw RSS text into candidate filing dicts (no I/O).
 
-    Items are returned sorted by published_at ASCENDING so that, within a cycle,
-    the earliest occurrence of a cross-source duplicate is stored first
-    (earliest-published wins).
+    Each candidate carries `_instant` (a tz-aware UTC datetime parsed from the
+    feed pubDate) so the caller can GLOBALLY sort candidates from ALL feeds by
+    true publication instant before storing — this is what guarantees
+    earliest-published-wins regardless of feed order in the config.
     """
     parsed = feedparser.parse(raw_text)
     items: list[dict] = []
@@ -187,6 +249,7 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
             "summary": summary,
             "url": url,
             "published_at": published_at,
+            "_instant": datetime.fromisoformat(published_at).astimezone(timezone.utc),
             "espi_ebi_type": detect_type(default_type, title, summary),
             "issuer_isin": extract_isin(title, summary),
             "issuer_name": title,  # best-effort; refined later by the LLM phase
@@ -194,7 +257,6 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
             "content_hash": chash,
             "dedup_key": dedup_key_for(entry, chash),
         })
-    items.sort(key=lambda it: it["published_at"])
     return items
 
 
@@ -213,10 +275,17 @@ def run_cycle(
 ) -> CycleStats:
     """Run ONE collection cycle over all enabled feeds.
 
-    Reliability: each feed is wrapped in try/except — one feed being down (or a
-    placeholder URL) never blocks the others or crashes the cycle. The health
-    beacon records success only if the cycle completes; per-feed failures are
-    logged and counted but do not abort.
+    Cross-source earliest-wins: candidates from ALL feeds are collected first,
+    then sorted GLOBALLY by true publication instant, and only then stored. This
+    makes earliest-published win regardless of feed order in the config (a later
+    Bankier mirror can no longer beat an earlier GPW primary just because it is
+    listed first).
+
+    Reliability: each feed fetch/parse is wrapped in try/except — one feed being
+    down never blocks the others or crashes the cycle. The health beacon records
+    SUCCESS only for a genuinely healthy cycle (every configured feed polled OK,
+    none failed or skipped); otherwise it records an error so VPS monitoring can
+    alert. Per-feed failures are logged and counted but do not abort.
     """
     filings_db.ensure_schema(conn)
     stats = CycleStats()
@@ -225,59 +294,96 @@ def run_cycle(
     timeout = float(config.get("request_timeout_seconds", 20))
     want_full_text = bool(config.get("fetch_full_text", True))
 
+    # --- 1. gather candidates from every feed (no DB writes yet) ---
+    candidates: list[dict] = []
     for feed_cfg in config.get("feeds", []):
         if not feed_cfg.get("enabled", True):
             continue
+        stats.feeds_configured += 1
         name = feed_cfg.get("name", "<unnamed>")
         url = feed_cfg.get("url")
         if _is_placeholder(url):
-            logger.warning("feed '%s' has a placeholder URL — skipping (paste the real feed URL)", name)
+            stats.feeds_skipped += 1
+            msg = f"feed '{name}' has a placeholder/missing URL — skipped"
+            stats.errors.append(msg)
+            logger.warning("%s (paste the real feed URL)", msg)
             continue
         try:
             raw = fetch_feed(url, user_agent=user_agent, timeout=timeout)
             items = parse_feed_items(feed_cfg, raw)
             stats.feeds_polled += 1
             stats.items_seen += len(items)
-            new_here = _store_items(
-                conn, items, want_full_text=want_full_text,
-                fetch_full_text=fetch_full_text, user_agent=user_agent, timeout=timeout,
-            )
-            stats.new_items += new_here
-            logger.info("feed '%s': %d items, %d new", name, len(items), new_here)
+            candidates.extend(items)
+            logger.info("feed '%s': %d items", name, len(items))
         except Exception as exc:  # noqa: BLE001 - one bad feed must not kill the cycle
             stats.feeds_failed += 1
             msg = f"feed '{name}' failed: {exc}"
             stats.errors.append(msg)
             logger.error(msg)
 
+    # --- 2. global sort by true instant (earliest first) ---
+    candidates.sort(key=lambda it: it["_instant"])
+
+    # --- 3. store with idempotency + cross-source dedup (earliest wins) ---
+    stats.new_items = _store_items(
+        conn, candidates, want_full_text=want_full_text,
+        fetch_full_text=fetch_full_text, user_agent=user_agent, timeout=timeout,
+    )
+
     conn.commit()
-    filings_db.mark_run_success(conn, stats.new_items)
+
+    # --- 4. health beacon: success ONLY if the whole cycle was healthy ---
+    if stats.healthy:
+        filings_db.mark_run_success(conn, stats.new_items)
+    else:
+        detail = "; ".join(stats.errors) or "no feeds polled"
+        filings_db.mark_run_error(
+            conn,
+            f"unhealthy cycle: {stats.feeds_polled}/{stats.feeds_configured} polled, "
+            f"{stats.feeds_failed} failed, {stats.feeds_skipped} skipped — {detail}",
+        )
+
     logger.info(
-        "cycle done: %d feeds polled, %d failed, %d items seen, %d new",
-        stats.feeds_polled, stats.feeds_failed, stats.items_seen, stats.new_items,
+        "cycle done: %d/%d feeds polled, %d failed, %d skipped, %d items seen, %d new, healthy=%s",
+        stats.feeds_polled, stats.feeds_configured, stats.feeds_failed,
+        stats.feeds_skipped, stats.items_seen, stats.new_items, stats.healthy,
     )
     return stats
 
 
 def _store_items(conn, items, *, want_full_text, fetch_full_text, user_agent, timeout) -> int:
-    """Resolve, dedup, and append a feed's items. Returns count of NEW rows."""
+    """Resolve, dedup, and append a globally-sorted batch. Returns NEW row count.
+
+    `items` MUST be pre-sorted by publication instant ascending so the earliest
+    occurrence of any cross-source duplicate is stored first. Dedup is two-layer:
+      1. idempotency: skip if dedup_key already in the DB;
+      2. cross-source: skip if (isin, report_number, type) already stored OR
+         already seen earlier in THIS batch — the earlier (earliest) row wins and
+         is never overwritten.
+    """
     new_count = 0
     fetched_at = datetime.now(timezone.utc).isoformat()
+    seen_report_keys: set[tuple[str, str, str]] = set()
     for it in items:
         # Primary idempotency gate: already stored under this dedup key.
         if filings_db.filing_exists(conn, it["dedup_key"]):
             continue
-        # Cross-source dedup: same (isin, report_number, type) already stored
-        # (earlier published_at) -> skip; never overwrite the earlier row.
-        existing = filings_db.find_by_report_key(
-            conn, it["issuer_isin"], it["report_number"], it["espi_ebi_type"]
-        )
-        if existing is not None:
-            logger.info(
-                "cross-source duplicate for %s %s/%s — keeping earliest published_at",
-                it["issuer_isin"], it["espi_ebi_type"], it["report_number"],
-            )
-            continue
+
+        report_key = None
+        if it["issuer_isin"] and it["report_number"] and it["espi_ebi_type"]:
+            report_key = (it["issuer_isin"], it["report_number"], it["espi_ebi_type"])
+
+        # Cross-source dedup against the DB and against earlier items in this batch.
+        if report_key is not None:
+            already = report_key in seen_report_keys or filings_db.find_by_report_key(
+                conn, *report_key
+            ) is not None
+            if already:
+                logger.info(
+                    "cross-source duplicate for %s %s/%s — keeping earliest published_at",
+                    it["issuer_isin"], it["espi_ebi_type"], it["report_number"],
+                )
+                continue
 
         instrument_id = filings_db.resolve_instrument_id(conn, it["issuer_isin"])
         full_text = ""
@@ -301,4 +407,6 @@ def _store_items(conn, items, *, want_full_text, fetch_full_text, user_agent, ti
         })
         if inserted:
             new_count += 1
+            if report_key is not None:
+                seen_report_keys.add(report_key)
     return new_count

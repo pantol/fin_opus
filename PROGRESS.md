@@ -4,7 +4,8 @@
 > implementation step** (new feature, fix, phase gate). Keep entries newest-first.
 
 **Current phase:** Phase 0+1 (deterministic core, no LLM) — **COMPLETE & green.**
-**Tests:** 60 passing. **Last commit:** `52ad1d0`.
+Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM).
+**Tests:** 68 passing.
 
 ---
 
@@ -39,6 +40,16 @@
 - [x] **CLI** (`app/cli.py`) — `ingest` / `features` / `backtest` (+`--offline`).
 - [x] **Skill** (`.claude/skills/point-in-time-backtest/SKILL.md`).
 
+## Collector checklist (ESPI/EBI + news — standalone plumbing, ZERO LLM)
+
+- [x] **Config** (`config/news_sources.yaml`) — feeds via config (placeholders + RSS-source comments), interval, db_path, UA.
+- [x] **Filings storage** (`app/ingestion/filings_db.py`) — owns `filings` + `collector_health`; idempotent migration; append-only insert; dedup/asof/health helpers.
+- [x] **Collector core** (`app/ingestion/news_collector.py`) — fetch RSS (feedparser), parse, ISIN/report/type extraction, full-text fetch, two-layer dedup, per-feed resilience.
+- [x] **Entrypoints** (`app/ingestion/collect_news.py`) — one-shot + APScheduler `--loop`; `make collect` / `make collect-loop`.
+- [x] **ISIN seam** — nullable `isin` on `instruments` (idempotent `ALTER TABLE` migration in `app/db.py`).
+- [x] **Tests** (`tests/test_news_collector.py`) — dedup, idempotency, point-in-time/tz, ISIN mapping, resilience (8 tests).
+- [x] **VPS deploy docs** — README cron + systemd + health verification.
+
 ## Invariants (enforced by tests)
 
 - [x] Point-in-time / no look-ahead (`tests/test_point_in_time.py`)
@@ -52,6 +63,22 @@
 ---
 
 ## Changelog (newest first)
+
+### 2026-06-20 — ESPI/EBI + news collector (standalone, ZERO LLM)
+New, independently runnable RSS collector writing append-only into `filings` in
+the shared SQLite DB. 68 tests green; one-shot + standalone runs verified.
+- `filings` + `collector_health` tables, owned & created by the collector
+  (runs before the rest of the app exists); append-only `ON CONFLICT DO NOTHING`.
+- Point-in-time: `published_at` from feed pubDate (Europe/Warsaw, tz-aware),
+  never from fetch time; `published_at <= T` reads are look-ahead-safe.
+- Two-layer dedup: per-item (guid/link/hash) idempotency + cross-source
+  (isin, report_number, type) earliest-published-wins.
+- ISIN → `instrument_id` resolution (null + resolvable later when unknown);
+  added nullable `isin` to `instruments` via idempotent migration.
+- Per-feed try/except, structured per-cycle logging, health beacon; placeholder
+  feed URLs skipped (config-driven feeds via `config/news_sources.yaml`).
+- APScheduler loop + one-shot entrypoints; `make collect` / `collect-loop`;
+  README VPS section (cron/systemd/verify). Deps: feedparser, apscheduler.
 
 ### 2026-06-20 — Backtest accounting fixes (`52ad1d0`)
 Code-review hardening of the event-driven engine + persistence. 60 tests green;

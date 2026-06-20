@@ -95,6 +95,85 @@ Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (see `.env.example`). Without a
 token the notifier runs in **dry-run** mode and prints the (Polish) alert card to
 the console. The notifier is output-only and never part of the decision path.
 
+## ESPI/EBI + news collector (standalone plumbing, ZERO LLM)
+
+A **separate, independently runnable** collector polls company-filing/news RSS
+feeds on a schedule, captures every new item at **publication time**
+(point-in-time anchor), maps it to an issuer by **ISIN**, fetches full text, and
+stores it **append-only + idempotently** into the `filings` table of the same
+SQLite DB. It never loses items and never alters timestamps of stored rows. The
+LLM (Phase 2) only *reads* what this collects — no LLM here.
+
+```bash
+make collect        # run ONE collection cycle, then exit
+make collect-loop   # run forever, polling every N minutes (N from config)
+```
+
+**Configure feeds in `config/news_sources.yaml`** — adding a feed is editing
+config, not code. The shipped URLs are **placeholders**; copy the exact channel
+feed URL from each provider's RSS page (GPW `gpw.pl/_rss`, NewConnect/
+GlobalConnect `gpwglobalconnect.pl/_rss`, Bankier `bankier.pl/rss`) and paste it
+in. A feed left as a `PLACEHOLDER_*` URL is skipped with a warning.
+
+Key guarantees:
+- **Point-in-time:** `published_at` comes from the feed `pubDate` (Europe/Warsaw,
+  stored tz-aware), never from fetch time; `fetched_at` is UTC. A
+  `published_at <= T` query never returns a later item.
+- **Idempotent / append-only:** dedup by `guid`/`link`/content-hash with
+  `ON CONFLICT(dedup_key) DO NOTHING`; re-running a cycle adds nothing and
+  rewrites nothing.
+- **Cross-source dedup:** the same report on GPW + Bankier is stored once, with
+  the **earliest** `published_at`, keyed by `(issuer_isin, report_number, type)`.
+- **ISIN mapping:** resolved to `instruments.id` by ISIN when available, else
+  `instrument_id` is null and resolvable later (the collector runs even before
+  the rest of the app/instruments exist — it owns and creates `filings`).
+- **Resilience:** per-feed `try/except` (one bad feed never blocks the others);
+  per-cycle structured logging; a `collector_health.last_successful_run` beacon
+  for staleness alerting.
+
+### VPS deployment
+
+Secrets/config come from `config/news_sources.yaml` and env (`.env` is
+gitignored) — never hardcoded. Be a polite poller: keep a sane interval and the
+descriptive `user_agent`.
+
+**Option A — cron** (one-shot every 10 min):
+
+```cron
+*/10 * * * * cd /opt/fin_opus && /opt/fin_opus/.venv/bin/python -m app.ingestion.collect_news >> /var/log/gpw_collect.log 2>&1
+```
+
+**Option B — systemd** (long-running scheduler):
+
+```ini
+# /etc/systemd/system/gpw-collector.service
+[Unit]
+Description=GPW ESPI/EBI + news collector
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/fin_opus
+ExecStart=/opt/fin_opus/.venv/bin/python -m app.ingestion.collect_news --loop
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now gpw-collector
+```
+
+**Verify it is running** (health beacon + recent rows):
+
+```bash
+sqlite3 data/gpw.db "SELECT last_successful_run, last_cycle_new_items, last_error FROM collector_health;"
+sqlite3 data/gpw.db "SELECT source, published_at, title FROM filings ORDER BY published_at DESC LIMIT 5;"
+```
+
+Alert if `last_successful_run` goes stale (older than a few poll intervals).
+
 ## Seams for later phases (NOT built here)
 
 The architecture leaves clean extension points; these are intentionally **not**

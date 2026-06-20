@@ -125,10 +125,10 @@ def upsert_instrument(conn, inst: dict, is_index: bool = False) -> int:
     """Insert or update an instrument; return its id."""
     conn.execute(
         """
-        INSERT INTO instruments (ticker, name, market, sector, is_index, listed_from, delisted_on)
-        VALUES (:ticker, :name, :market, :sector, :is_index, :listed_from, :delisted_on)
+        INSERT INTO instruments (ticker, name, market, sector, isin, is_index, listed_from, delisted_on)
+        VALUES (:ticker, :name, :market, :sector, :isin, :is_index, :listed_from, :delisted_on)
         ON CONFLICT(ticker) DO UPDATE SET
-            name=excluded.name, sector=excluded.sector, is_index=excluded.is_index,
+            name=excluded.name, sector=excluded.sector, isin=excluded.isin, is_index=excluded.is_index,
             listed_from=excluded.listed_from, delisted_on=excluded.delisted_on
         """,
         {
@@ -136,6 +136,7 @@ def upsert_instrument(conn, inst: dict, is_index: bool = False) -> int:
             "name": inst.get("name", inst["ticker"]),
             "market": inst.get("market", "GPW"),
             "sector": inst.get("sector"),
+            "isin": inst.get("isin"),
             "is_index": 1 if is_index else 0,
             "listed_from": _iso(inst.get("listed_from")),
             "delisted_on": _iso(inst.get("delisted_on")),

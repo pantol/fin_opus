@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline collect collect-loop clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -27,6 +27,14 @@ backtest: ingest
 # Same chain but with deterministic DEMO data (offline; NOT real prices).
 backtest-offline: ingest-offline
 	$(PYTHON) -m app.cli backtest
+
+# ESPI/EBI + news collector (standalone, ZERO LLM). One-shot cycle.
+collect:
+	$(PYTHON) -m app.ingestion.collect_news
+
+# Same collector, but run forever on the configured schedule (VPS daemon).
+collect-loop:
+	$(PYTHON) -m app.ingestion.collect_news --loop
 
 clean:
 	rm -f data/*.db

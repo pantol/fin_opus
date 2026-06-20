@@ -1,0 +1,47 @@
+# ESPI/EBI + news collector configuration.
+#
+# Adding a feed = editing this file, NOT code. The collector polls every feed
+# below on a schedule, captures each new filing/news item at publication time,
+# and stores it append-only + idempotently into the `filings` table.
+#
+# ZERO LLM: this is plumbing only. The LLM (Phase 2) only READS what is stored.
+#
+# IMPORTANT: the `url` values are PLACEHOLDERS. Do NOT trust invented .xml URLs.
+# Copy the EXACT channel feed URL from each provider's RSS page (links below)
+# and paste it in. A feed whose url is still a PLACEHOLDER_* token is skipped at
+# runtime with a warning (so an un-pasted feed never crashes a cycle).
+
+db_path: null                 # null -> use the main app DB (data/gpw.db)
+poll_interval_minutes: 10     # scheduler interval for the --loop runner
+request_timeout_seconds: 20   # per-request timeout (RSS + full-text fetch)
+fetch_full_text: true         # fetch the article/filing body from each item url
+user_agent: "gpw-decision-system news collector (+set-your-contact@example.com)"
+
+feeds:
+  # GPW main market — ESPI / komunikaty channel.
+  # Copy the exact channel feed URL from: https://www.gpw.pl/_rss
+  - name: gpw_espi
+    enabled: true
+    type: ESPI                # default espi_ebi_type when an item doesn't say
+    url: "PLACEHOLDER_GPW_ESPI_RSS_URL"
+
+  # NewConnect / GlobalConnect — komunikaty channel.
+  # Copy the exact channel feed URL from: https://gpwglobalconnect.pl/_rss
+  - name: newconnect
+    enabled: true
+    type: EBI
+    url: "PLACEHOLDER_NEWCONNECT_RSS_URL"
+
+  # Bankier "Komunikaty ze spolek" — ESPI/EBI channel.
+  # Copy the exact channel feed URL from: https://www.bankier.pl/rss
+  - name: bankier_espi_ebi
+    enabled: true
+    type: null               # type detected per-item from the title when possible
+    url: "PLACEHOLDER_BANKIER_RSS_URL"
+
+  # --- Add more sources later (copy the EXACT feed URL, do not invent one). ---
+  # PAP Biznes / ESPI:
+  # - name: pap
+  #   enabled: false
+  #   type: null
+  #   url: "PLACEHOLDER_PAP_RSS_URL"

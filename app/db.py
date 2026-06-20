@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS instruments (
     name         TEXT NOT NULL,
     market       TEXT NOT NULL DEFAULT 'GPW',
     sector       TEXT,
+    isin         TEXT,                          -- ISO 6166 code, used to map filings
     is_index     INTEGER NOT NULL DEFAULT 0,   -- boolean (0/1)
     listed_from  TEXT,                          -- ISO date
     delisted_on  TEXT                           -- ISO date, NULL if active
@@ -112,6 +113,30 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create all tables if they do not exist."""
+    """Create all tables if they do not exist + run lightweight column migrations.
+
+    Column migrations run BEFORE indexes that depend on added columns, so a
+    pre-existing database (e.g. an `instruments` table without `isin`) upgrades
+    cleanly.
+    """
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_instruments_isin ON instruments(isin)")
     conn.commit()
+
+
+def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """True if `column` exists on `table` (and the table exists)."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent additive migrations for pre-existing databases.
+
+    `CREATE TABLE IF NOT EXISTS` does not add new columns to a table that
+    already exists, so add them explicitly when missing. Additive only — never
+    drops or rewrites existing data.
+    """
+    if not column_exists(conn, "instruments", "isin"):
+        conn.execute("ALTER TABLE instruments ADD COLUMN isin TEXT")

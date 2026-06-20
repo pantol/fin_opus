@@ -27,3 +27,7 @@ def load_backtest_config() -> dict[str, Any]:
 
 def load_strategy(name: str) -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "strategies" / f"{name}.yaml")
+
+
+def load_news_sources() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "news_sources.yaml")

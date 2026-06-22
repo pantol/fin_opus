@@ -10,6 +10,7 @@ dependencies = [
     "pyyaml>=6.0",
     "feedparser>=6.0",
     "apscheduler>=3.10",
+    "jsonschema>=4.0",
 ]
 
 [project.optional-dependencies]

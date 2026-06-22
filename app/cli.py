@@ -4,8 +4,11 @@ Usage:
     python -m app.cli ingest
     python -m app.cli features
     python -m app.cli backtest [--strategy trend_momentum]
+    python -m app.cli ab [--baseline trend_momentum] [--llm trend_momentum_llm]
 
-The deterministic core only. No LLM anywhere in this path.
+The money path is deterministic. The `ab` command compares a baseline strategy
+against one that adds an `llm_score` gate; it reads PRE-MATERIALIZED LLM features
+from the DB and makes NO LLM call (sizing/risk stay deterministic).
 """
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ import sys
 import yaml
 
 from app import config as cfg
-from app.backtest import engine
+from app.backtest import ab_harness, engine
 from app.db import connect, init_db
 from app.ingestion import demo, stooq
 from app.logging import decisions as declog
@@ -97,6 +100,29 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_ab(args) -> int:
+    """Run the baseline vs baseline+LLM A/B comparison on the OOS window."""
+    conn = connect(args.db)
+    init_db(conn)
+    universe = cfg.load_universe()
+    bt_cfg = cfg.load_backtest_config()
+    baseline = cfg.load_strategy(args.baseline)
+    llm = cfg.load_strategy(args.llm)
+
+    instruments, _ = engine.load_instruments(conn, universe, universe["benchmark"]["ticker"])
+    if not instruments:
+        print("No price data. Run `make ingest` first.")
+        return 1
+
+    print(f"A/B: baseline='{baseline['name']}' vs llm='{llm['name']}' "
+          f"on {len(instruments)} instruments (OOS, realistic costs)...")
+    report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg)
+    print()
+    print(report.as_text())
+    conn.close()
+    return 0
+
+
 def _persist_results(conn, user_id: str, result, *, strategy_id=None, params=None) -> None:
     for d in result.decisions:
         dec_id = declog.log_decision(
@@ -149,6 +175,9 @@ def main(argv=None) -> int:
     sub.add_parser("features", help="Compute and preview features")
     bt = sub.add_parser("backtest", help="Run walk-forward backtest vs WIG20TR")
     bt.add_argument("--strategy", default="trend_momentum")
+    ab = sub.add_parser("ab", help="A/B: baseline vs baseline+LLM (OOS, uses materialized LLM features)")
+    ab.add_argument("--baseline", default="trend_momentum")
+    ab.add_argument("--llm", default="trend_momentum_llm")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -157,6 +186,8 @@ def main(argv=None) -> int:
         return cmd_features(args)
     if args.command == "backtest":
         return cmd_backtest(args)
+    if args.command == "ab":
+        return cmd_ab(args)
     return 1
 
 

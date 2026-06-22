@@ -49,6 +49,10 @@ class Instrument:
     delisted_on: str | None
     prices: pd.DataFrame      # full history (date-indexed)
     features: pd.DataFrame    # precomputed feature panel (date-indexed)
+    # Optional point-in-time LLM scores (date-indexed Series in [-1, 1]).
+    # When present, the as-of value is injected as `llm_score` into the snapshot.
+    # The LLM is ALWAYS only an INPUT here -- sizing/risk stays deterministic.
+    llm_scores: pd.Series | None = None
 
 
 @dataclass
@@ -248,6 +252,12 @@ def run_backtest(
             close = snap.get("close")
             if close is None:
                 continue
+            # Inject the point-in-time LLM score (only data with date <= T) as a
+            # plain feature. It feeds the YAML rule like any other feature; sizing
+            # and risk remain deterministic (CLAUDE.md rule 1).
+            llm_score = _llm_score_on(inst, day)
+            if llm_score is not None:
+                snap["llm_score"] = llm_score
 
             in_pos = inst.ticker in positions
             has_pending_buy = inst.ticker in pending_buys
@@ -376,6 +386,21 @@ def _feature_on(inst: Instrument, day: pd.Timestamp, name: str):
         val = inst.features.at[day, name]
         return None if pd.isna(val) else float(val)
     return None
+
+
+def _llm_score_on(inst: Instrument, day: pd.Timestamp):
+    """Point-in-time LLM score: the last score with date <= `day`, or None.
+
+    No look-ahead: a score materialized for a later date is never visible at T.
+    """
+    scores = inst.llm_scores
+    if scores is None or scores.empty:
+        return None
+    eligible = scores.loc[scores.index <= day]
+    if eligible.empty:
+        return None
+    val = eligible.iloc[-1]
+    return None if pd.isna(val) else float(val)
 
 
 def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, decisions_log):

@@ -32,7 +32,10 @@ def _client(conn, research_content, synthesis_content):
             "usage": {"prompt_tokens_details": {"cached_tokens": 0}},
         }
 
-    return LLMClient(conn, cfg, transport=transport, api_key="k")
+    def meta(url, headers, timeout):  # offline provider stub (no network)
+        return {"data": {"provider_name": "OpenAI"}}
+
+    return LLMClient(conn, cfg, transport=transport, meta_transport=meta, api_key="k")
 
 
 def _research_json():
@@ -122,7 +125,9 @@ def test_load_llm_scores_returns_pit_series():
     assert str(s.index[0].date()) == "2024-05-02"
 
 
-def test_pipeline_rejected_research_still_marks_processed():
+def test_pipeline_rejected_research_bumps_attempts_not_processed():
+    # A malformed filing must NOT be marked processed (no feature exists for it);
+    # instead its attempt counter is bumped so it can be retried, then retired.
     conn = connect(":memory:")
     init_db(conn)
     iid = _setup(conn)
@@ -133,5 +138,65 @@ def test_pipeline_rejected_research_still_marks_processed():
         as_of_date="2024-05-02", quant_score=None,
     )
     assert out is None
-    # consumed so we don't loop on a malformed filing forever
-    assert conn.execute("SELECT processed FROM filings WHERE dedup_key='bad'").fetchone()[0] == 1
+    row = conn.execute(
+        "SELECT processed, attempts FROM filings WHERE dedup_key='bad'"
+    ).fetchone()
+    assert row["processed"] == 0  # NOT hidden; no feature was persisted
+    assert row["attempts"] == 1
+    # no llm_features row was created for the malformed filing
+    assert conn.execute("SELECT COUNT(*) FROM llm_features").fetchone()[0] == 0
+
+
+def test_pipeline_retires_permanently_malformed_filing_after_max_attempts():
+    # After MAX_ATTEMPTS failures the filing is given up on (marked processed)
+    # so the pipeline stops re-reading it forever -- still WITHOUT a feature row.
+    conn = connect(":memory:")
+    init_db(conn)
+    iid = _setup(conn)
+    _insert_filing(conn, iid, "2024-05-01T09:00:00+02:00", "bad")
+    client = _client(conn, "not json", _synthesis_json())  # always malformed
+    for _ in range(pipeline.MAX_ATTEMPTS):
+        out = pipeline.compute_feature_for_date(
+            conn, client, instrument_id=iid, ticker="pko",
+            as_of_date="2024-05-02", quant_score=None,
+        )
+        assert out is None
+    row = conn.execute(
+        "SELECT processed, attempts FROM filings WHERE dedup_key='bad'"
+    ).fetchone()
+    assert row["attempts"] == pipeline.MAX_ATTEMPTS
+    assert row["processed"] == 1  # retired after exhausting retries
+    # a subsequent run no longer sees it (max_attempts filter)
+    out = pipeline.compute_feature_for_date(
+        conn, client, instrument_id=iid, ticker="pko",
+        as_of_date="2024-05-02", quant_score=None,
+    )
+    assert out is None
+    assert conn.execute("SELECT COUNT(*) FROM llm_features").fetchone()[0] == 0
+
+
+def test_pipeline_warsaw_boundary_early_morning_filing_counts_for_local_day():
+    # A filing at 01:30 CEST on 2024-05-03 is 2024-05-02T23:30Z. With a Warsaw
+    # local end-of-day cutoff it belongs to May 3 (its OWN local day), and must
+    # NOT leak into the May 2 decision.
+    conn = connect(":memory:")
+    init_db(conn)
+    iid = _setup(conn)
+    _insert_filing(conn, iid, "2024-05-03T01:30:00+02:00", "early")
+    client = _client(conn, _research_json(), _synthesis_json())
+
+    # Decision date May 2: the early-May-3 filing must be invisible (no leak).
+    out_may2 = pipeline.compute_feature_for_date(
+        conn, client, instrument_id=iid, ticker="pko",
+        as_of_date="2024-05-02", quant_score=None,
+    )
+    assert out_may2 is None
+    assert conn.execute("SELECT processed FROM filings WHERE dedup_key='early'").fetchone()[0] == 0
+
+    # Decision date May 3: now in-window and consumed.
+    out_may3 = pipeline.compute_feature_for_date(
+        conn, client, instrument_id=iid, ticker="pko",
+        as_of_date="2024-05-03", quant_score=0.1,
+    )
+    assert out_may3 is not None
+    assert conn.execute("SELECT processed FROM filings WHERE dedup_key='early'").fetchone()[0] == 1

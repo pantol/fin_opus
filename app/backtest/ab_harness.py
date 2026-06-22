@@ -16,7 +16,6 @@ import copy
 from dataclasses import dataclass
 
 from app.backtest import engine
-from app.llm import pipeline
 
 
 @dataclass
@@ -57,22 +56,6 @@ GATE_PRIMARY = "sharpe"
 GATE_SECONDARY = "sortino"
 
 
-def _attach_llm_scores(conn, instruments):
-    """Return a deep-ish copy of instruments with point-in-time llm_scores set."""
-    out = []
-    for inst in instruments:
-        scores = pipeline.load_llm_scores(conn, inst.instrument_id)
-        out.append(
-            engine.Instrument(
-                instrument_id=inst.instrument_id, ticker=inst.ticker,
-                sector=inst.sector, listed_from=inst.listed_from,
-                delisted_on=inst.delisted_on, prices=inst.prices,
-                features=inst.features, llm_scores=scores,
-            )
-        )
-    return out
-
-
 def _evaluate_gate(baseline: dict, llm: dict) -> tuple[bool, dict]:
     deltas = {}
     for k in ("cagr", "sharpe", "sortino", "max_drawdown", "calmar",
@@ -105,7 +88,7 @@ def run_ab(
     base_res = engine.run_walk_forward(
         instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg
     )
-    llm_instruments = _attach_llm_scores(conn, instruments)
+    llm_instruments = engine.attach_llm_scores(conn, instruments)
     llm_res = engine.run_walk_forward(
         llm_instruments, bench_close, copy.deepcopy(llm_cfg), bt_cfg
     )

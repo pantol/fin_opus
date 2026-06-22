@@ -22,7 +22,11 @@ def _make_client(content):
             "usage": {"prompt_tokens_details": {"cached_tokens": 0}},
         }
 
-    return LLMClient(conn, load_llm_config(), transport=transport, api_key="k")
+    def meta(url, headers, timeout):  # offline provider stub (no network)
+        return {"data": {"provider_name": "OpenAI"}}
+
+    return LLMClient(conn, load_llm_config(), transport=transport,
+                     meta_transport=meta, api_key="k")
 
 
 def _research_json(**over):

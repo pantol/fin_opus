@@ -35,10 +35,18 @@ def _verdict_json(**over):
     return json.dumps(base)
 
 
+def _meta(url, headers, timeout):  # offline provider stub (no network)
+    return {"data": {"provider_name": "OpenAI"}}
+
+
 def _client(transport):
     conn = connect(":memory:")
     init_db(conn)
-    return LLMClient(conn, load_llm_config(), transport=transport, api_key="k"), conn
+    return (
+        LLMClient(conn, load_llm_config(), transport=transport,
+                  meta_transport=_meta, api_key="k"),
+        conn,
+    )
 
 
 def test_verdict_mapped_to_llm_score():
@@ -86,7 +94,8 @@ def test_point_in_time_fundamentals_into_synthesis():
     # As of 2024-05-01 only the March figure is known.
     snap = fnd.load_fundamentals_asof(conn, iid, "2024-05-01")
     rec = _Recorder(_verdict_json())
-    client = LLMClient(conn, load_llm_config(), transport=rec, api_key="k")
+    client = LLMClient(conn, load_llm_config(), transport=rec,
+                       meta_transport=_meta, api_key="k")
     syn.synthesize(client, "pko", research=None, quant_score=None, fundamentals=snap)
     user_msg = rec.bodies[0]["messages"][-1]["content"]
     assert "pe=12.0" in user_msg     # the point-in-time figure

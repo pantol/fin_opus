@@ -6,7 +6,7 @@
 **Current phase:** Phase 2 (LLM FEATURES layer) — **plumbing COMPLETE & green;
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 113 passing.
+ZERO LLM in the money path. **Tests:** 121 passing.
 
 ---
 
@@ -16,7 +16,7 @@ ZERO LLM in the money path. **Tests:** 113 passing.
 |-------|-------|--------|
 | 0 | Scaffold: `app/` package, config, db schema, Makefile, README | ✅ Done |
 | 1 | Data + features + 1 strategy + full risk + backtest + log + Telegram stub (no LLM) | ✅ Done |
-| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done (113 green); A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
+| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done (121 green); A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
 | 3 | Regime radar / turning points | ⬜ Not started |
 | 4 | Academic strategies (more YAML, same engine) | ⬜ Not started |
 | 5 | Survey / user profile | ⬜ Not started |
@@ -84,6 +84,29 @@ ZERO LLM in the money path. **Tests:** 113 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-06-22 — Phase 2 review fixes (PIT tz, persist-then-mark, CLI gate, provider audit)
+Code-review hardening of the Phase-2 LLM features layer. 121 tests green
+(+8); offline A/B still honestly reports NO improvement (no filings → gate
+blocks all entries). Still ZERO LLM in the money path.
+- **P1 (point-in-time tz):** filing cutoff now uses Europe/Warsaw local
+  end-of-day (`datetime.combine(... time(23,59,59), tzinfo=Warsaw)`), so an
+  01:30 CEST filing counts for its OWN local day instead of leaking into the
+  prior UTC day. New boundary test.
+- **P2 (integrity):** filings are marked `processed` ONLY after the
+  `llm_features` row is persisted. A rejected research/synthesis bumps a new
+  `attempts` column instead; a filing is retired (marked processed, no feature)
+  only after `MAX_ATTEMPTS`, so a malformed item is neither hidden nor retried
+  forever. `select_filings_asof` gains a `max_attempts` filter.
+- **P2 (CLI gate):** `backtest --strategy trend_momentum_llm` now attaches
+  materialized `llm_scores` when the strategy references `llm_score`
+  (`engine.strategy_uses_llm_score` + shared `engine.attach_llm_scores`);
+  previously only the A/B harness did, so the LLM strategy silently took no
+  entries.
+- **P2 (provider audit):** the served provider is fetched from the OpenRouter
+  generation-metadata endpoint (the chat response omits it) via an injectable
+  GET transport; resolved provider is cached so a cache hit keeps it; honest
+  NULL on failure (never guessed).
 
 ### 2026-06-22 — Phase 2: LLM FEATURES layer + A/B harness (LLM = INPUT only)
 Full Phase-2 plumbing, 113 tests green. The LLM never touches sizing/risk/

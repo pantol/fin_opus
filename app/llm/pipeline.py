@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -26,6 +27,12 @@ from app.llm import research as research_mod
 from app.llm import synthesis as syn
 
 log = logging.getLogger("llm.pipeline")
+
+WARSAW = ZoneInfo("Europe/Warsaw")
+
+# A filing that fails research/synthesis this many times is given up on (marked
+# processed) so the pipeline does not retry a permanently malformed item forever.
+MAX_ATTEMPTS = 3
 
 
 def _now() -> str:
@@ -49,13 +56,23 @@ def compute_feature_for_date(
 ) -> dict | None:
     """Compute and persist one llm_features row for (instrument, as_of_date).
 
-    `as_of_date` is the decision date T (ISO date). Filings are read with a
-    tz-aware end-of-day cutoff so any item published on T (Europe/Warsaw) counts.
+    `as_of_date` is the decision date T (ISO date). Filings are read with a cutoff
+    of end-of-day T in Europe/Warsaw (the exchange's local day), so an item
+    published just after midnight CEST counts for its OWN local day, not the
+    previous UTC day. No look-ahead.
+
+    Filings are marked processed ONLY after a feature is successfully persisted.
+    A filing whose research/synthesis is rejected gets its attempt counter bumped
+    (and is skipped once it exceeds MAX_ATTEMPTS) rather than being silently
+    marked processed with no feature row.
+
     Returns the synthesis dict (with llm_score) or None if nothing to do / rejected.
     """
-    cutoff = datetime.fromisoformat(f"{as_of_date}T23:59:59+00:00")
+    cutoff = datetime.combine(datetime.fromisoformat(as_of_date).date(),
+                              time(23, 59, 59), tzinfo=WARSAW)
     filings = filings_db.select_filings_asof(
-        conn, cutoff, instrument_id=instrument_id, only_unprocessed=True
+        conn, cutoff, instrument_id=instrument_id, only_unprocessed=True,
+        max_attempts=MAX_ATTEMPTS,
     )
     if not filings:
         return None
@@ -68,10 +85,12 @@ def compute_feature_for_date(
         if r is not None:
             research_items.append(r)
 
-    # Even if all research was rejected, mark filings processed so we do not
-    # reprocess malformed items forever.
-    filings_db.mark_processed(conn, consumed_ids)
     if not research_items:
+        # Nothing usable this run; record the attempt so a permanently malformed
+        # filing is eventually given up on, but do NOT mark it processed (no
+        # feature exists for it yet).
+        filings_db.bump_attempts(conn, consumed_ids)
+        _giveup_exhausted(conn, consumed_ids)
         return None
 
     # Aggregate research deterministically: highest-confidence item drives it.
@@ -82,6 +101,8 @@ def compute_feature_for_date(
         client, ticker, research=research, quant_score=quant_score, fundamentals=funds
     )
     if verdict is None:
+        filings_db.bump_attempts(conn, consumed_ids)
+        _giveup_exhausted(conn, consumed_ids)
         return None
 
     conn.execute(
@@ -103,7 +124,34 @@ def compute_feature_for_date(
         ),
     )
     conn.commit()
+    # A feature now exists for these filings -> safe to mark them consumed.
+    filings_db.mark_processed(conn, consumed_ids)
     return verdict
+
+
+def _giveup_exhausted(conn, filing_ids) -> int:
+    """Retire filings whose attempt counter has reached MAX_ATTEMPTS.
+
+    A permanently malformed filing would otherwise be re-read on every run
+    (it never produces a feature, so it is never marked processed). Once it
+    has burned MAX_ATTEMPTS, mark it processed so the pipeline stops retrying
+    it. No `llm_features` row is created -- the absence is intentional and the
+    `attempts` column records why.
+    """
+    ids = [int(i) for i in filing_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    exhausted = [
+        r["id"]
+        for r in conn.execute(
+            f"SELECT id FROM filings WHERE id IN ({placeholders}) AND attempts >= ?",
+            (*ids, MAX_ATTEMPTS),
+        ).fetchall()
+    ]
+    if exhausted:
+        filings_db.mark_processed(conn, exhausted)
+    return len(exhausted)
 
 
 def load_llm_scores(conn, instrument_id: int) -> pd.Series:

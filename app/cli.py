@@ -89,6 +89,17 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
+    # If the strategy gates on `llm_score`, attach point-in-time LLM features
+    # (materialized earlier; read deterministically, NO LLM call). Otherwise the
+    # gate would never see a score and silently block every entry.
+    if engine.strategy_uses_llm_score(strat):
+        instruments = engine.attach_llm_scores(conn, instruments)
+        with_scores = sum(
+            1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
+        )
+        print(f"Strategy uses llm_score; attached LLM features for "
+              f"{with_scores}/{len(instruments)} instruments.")
+
     print(f"Running walk-forward backtest on {len(instruments)} instruments "
           f"(strategy: {strat['name']} v{strat['version']})...")
     result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg)

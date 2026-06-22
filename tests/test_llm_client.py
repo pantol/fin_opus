@@ -13,13 +13,22 @@ from app.llm.client import LLMClient, input_hash
 
 
 def _fake_response(content='{"ok": true}'):
+    # NOTE: the real OpenRouter chat response has NO `provider` field; the served
+    # provider is exposed only by the generation-metadata endpoint (see
+    # _fake_meta_transport). The fake deliberately omits it.
     return {
         "id": "gen-abc123",
         "model": "openai/gpt-4o-mini",
-        "provider": "OpenAI",
         "choices": [{"message": {"role": "assistant", "content": content}}],
         "usage": {"prompt_tokens_details": {"cached_tokens": 7}},
     }
+
+
+def _fake_meta_transport(provider="OpenAI"):
+    """GET /generation?id=... stub returning the served provider name."""
+    def meta(url, headers, timeout):
+        return {"data": {"id": "gen-abc123", "provider_name": provider}}
+    return meta
 
 
 def _counting_transport(response):
@@ -32,11 +41,18 @@ def _counting_transport(response):
     return transport, calls
 
 
-def _client(transport):
+def _client(transport, meta_transport=None):
     conn = connect(":memory:")
     init_db(conn)
     cfg = load_llm_config()
-    return LLMClient(conn, cfg, transport=transport, api_key="test-key"), conn
+    return (
+        LLMClient(
+            conn, cfg, transport=transport,
+            meta_transport=meta_transport or _fake_meta_transport(),
+            api_key="test-key",
+        ),
+        conn,
+    )
 
 
 def _messages():
@@ -58,6 +74,48 @@ def test_served_provider_model_generation_logged_on_every_call():
     assert row["served_model"] == "openai/gpt-4o-mini"
     assert row["generation_id"] == "gen-abc123"
     assert row["cached_tokens"] == 7
+
+
+def test_provider_resolved_from_generation_metadata_not_chat_response():
+    # The chat response carries no provider; it must come from the metadata GET.
+    transport, _ = _counting_transport(_fake_response())
+    client, conn = _client(transport, meta_transport=_fake_meta_transport("Together"))
+    res = client.complete_json("extraction", _messages())
+    assert res.served_provider == "Together"
+    row = conn.execute("SELECT served_provider FROM llm_calls").fetchone()
+    assert row["served_provider"] == "Together"
+
+
+def test_provider_is_null_when_metadata_unavailable():
+    # A failing metadata endpoint must yield an honest NULL, never a guess.
+    transport, _ = _counting_transport(_fake_response())
+
+    def failing_meta(url, headers, timeout):
+        raise RuntimeError("metadata endpoint down")
+
+    client, conn = _client(transport, meta_transport=failing_meta)
+    res = client.complete_json("extraction", _messages())
+    assert res.served_provider is None
+    row = conn.execute("SELECT served_provider FROM llm_calls").fetchone()
+    assert row["served_provider"] is None
+
+
+def test_cached_provider_survives_cache_hit():
+    # A cache hit must still report the provider resolved on the original call,
+    # WITHOUT a second metadata lookup.
+    transport, tcalls = _counting_transport(_fake_response('{"v": 1}'))
+    meta_calls = {"n": 0}
+
+    def meta(url, headers, timeout):
+        meta_calls["n"] += 1
+        return {"data": {"provider_name": "OpenAI"}}
+
+    client, _ = _client(transport, meta_transport=meta)
+    r1 = client.complete_json("extraction", _messages())
+    r2 = client.complete_json("extraction", _messages())
+    assert tcalls["n"] == 1 and meta_calls["n"] == 1  # no second network/meta call
+    assert r1.served_provider == r2.served_provider == "OpenAI"
+    assert r2.cache_hit is True
 
 
 def test_cache_hit_returns_stored_json_without_second_network_call():

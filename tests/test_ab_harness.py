@@ -18,8 +18,8 @@ from app.ingestion import stooq
 from tests.conftest import make_stooq_csv, synthetic_series
 
 
-def _build_db():
-    conn = connect(":memory:")
+def _build_db(path=":memory:"):
+    conn = connect(path)
     init_db(conn)
 
     def ing(t, rows, **kw):
@@ -88,6 +88,57 @@ def test_negative_llm_score_blocks_entries_positive_permits():
     ) for i in insts]
     res_pos = engine.run_walk_forward(pos, bench, llm_cfg, bt)
     assert any(d["action"] == "ENTER" for d in res_pos.decisions)
+
+
+def test_strategy_uses_llm_score_detection():
+    base = cfg.load_strategy("trend_momentum")
+    llm = cfg.load_strategy("trend_momentum_llm")
+    assert engine.strategy_uses_llm_score(base) is False
+    assert engine.strategy_uses_llm_score(llm) is True
+
+
+def test_attach_llm_scores_loads_materialized_features():
+    conn = _build_db()
+    insts, _ = engine.load_instruments(conn, _universe(), "wig20tr")
+    target = insts[0]
+    d0 = target.features.index[0].date().isoformat()
+    conn.execute(
+        "INSERT INTO llm_features (instrument_id, as_of_date, llm_score, created_at) VALUES (?,?,?,?)",
+        (target.instrument_id, d0, 0.5, "now"),
+    )
+    conn.commit()
+
+    attached = engine.attach_llm_scores(conn, insts)
+    by_id = {i.instrument_id: i for i in attached}
+    assert not by_id[target.instrument_id].llm_scores.empty
+    assert by_id[target.instrument_id].llm_scores.iloc[0] == 0.5
+    # an instrument without features gets an empty (not None) score series
+    other = next(i for i in attached if i.instrument_id != target.instrument_id)
+    assert other.llm_scores.empty
+
+
+def test_cli_backtest_with_llm_strategy_attaches_scores(capsys, tmp_path, monkeypatch):
+    import app.cli as cli
+
+    # The default universe loaded by the CLI must match the synthetic DB.
+    monkeypatch.setattr(cfg, "load_universe", _universe)
+
+    db_path = str(tmp_path / "cli.db")
+    conn = _build_db(db_path)
+    insts, _ = engine.load_instruments(conn, _universe(), "wig20tr")
+    for inst in insts:
+        d0 = inst.features.index[0].date().isoformat()
+        conn.execute(
+            "INSERT INTO llm_features (instrument_id, as_of_date, llm_score, created_at) VALUES (?,?,?,?)",
+            (inst.instrument_id, d0, 1.0, "now"),
+        )
+    conn.commit()
+    conn.close()  # the CLI reopens its own connection on the same file
+
+    rc = cli.main(["--db", db_path, "backtest", "--strategy", "trend_momentum_llm"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "attached LLM features" in out
 
 
 def test_ab_harness_runs_and_reports():

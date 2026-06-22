@@ -403,6 +403,43 @@ def _llm_score_on(inst: Instrument, day: pd.Timestamp):
     return None if pd.isna(val) else float(val)
 
 
+def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
+    """True if any condition in the strategy config references the `llm_score`
+    feature. Used to decide whether to attach materialized LLM scores before a
+    plain backtest (so an LLM strategy is not silently starved of its gate).
+    """
+    def _walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("feature") == "llm_score":
+                return True
+            return any(_walk(v) for v in node.values())
+        if isinstance(node, (list, tuple)):
+            return any(_walk(v) for v in node)
+        return False
+
+    return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+
+
+def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
+    """Return copies of `instruments` carrying point-in-time `llm_scores` read
+    deterministically from materialized `llm_features` (no LLM call here).
+    """
+    from app.llm import pipeline  # local import: keeps engine LLM-free at import
+
+    out: list[Instrument] = []
+    for inst in instruments:
+        scores = pipeline.load_llm_scores(conn, inst.instrument_id)
+        out.append(
+            Instrument(
+                instrument_id=inst.instrument_id, ticker=inst.ticker,
+                sector=inst.sector, listed_from=inst.listed_from,
+                delisted_on=inst.delisted_on, prices=inst.prices,
+                features=inst.features, llm_scores=scores,
+            )
+        )
+    return out
+
+
 def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, decisions_log):
     """Fill a pending order on `day` at the bar open with realistic costs.
 

@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS filings (
     full_text     TEXT,
     content_hash  TEXT NOT NULL,            -- sha256 of canonical content
     dedup_key     TEXT NOT NULL,            -- guid/link, fallback content_hash
-    processed     INTEGER NOT NULL DEFAULT 0,  -- boolean (0/1); LLM pipeline flips this later
+    processed     INTEGER NOT NULL DEFAULT 0,  -- boolean (0/1); set only after a feature persists
+    attempts      INTEGER NOT NULL DEFAULT 0,  -- LLM-pipeline attempt count (retry/giveup tracking)
     UNIQUE (dedup_key)
 );
 CREATE INDEX IF NOT EXISTS idx_filings_report
@@ -55,8 +56,15 @@ CREATE TABLE IF NOT EXISTS collector_health (
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the filings + health tables if absent. Idempotent."""
+    """Create the filings + health tables if absent. Idempotent.
+
+    Additive column migrations run for pre-existing databases (CREATE TABLE IF
+    NOT EXISTS does not add new columns to an existing table).
+    """
     conn.executescript(FILINGS_SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(filings)").fetchall()}
+    if "attempts" not in cols:
+        conn.execute("ALTER TABLE filings ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -181,16 +189,77 @@ def get_health(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM collector_health WHERE id = 1").fetchone()
 
 
-def select_filings_asof(conn: sqlite3.Connection, as_of: str | datetime) -> list[sqlite3.Row]:
+def select_filings_asof(
+    conn: sqlite3.Connection,
+    as_of: str | datetime,
+    *,
+    instrument_id: int | None = None,
+    only_unprocessed: bool = False,
+    max_attempts: int | None = None,
+) -> list[sqlite3.Row]:
     """Point-in-time read: only filings with published_at <= `as_of`.
 
     `as_of` is a tz-aware ISO string or datetime. `published_at` is stored
     tz-aware (Europe/Warsaw); comparison is done on PARSED, tz-aware datetimes
     (converted to a common instant), so a differing stored offset can never
     leak a future item past the cutoff. No look-ahead.
+
+    Optional filters: restrict to one `instrument_id`, only `processed = 0`,
+    and/or `attempts < max_attempts` (skip items that keep failing the LLM).
     """
     cutoff = as_of if isinstance(as_of, datetime) else datetime.fromisoformat(as_of)
     if cutoff.tzinfo is None:
         raise ValueError("as_of must be timezone-aware (point-in-time safety)")
-    rows = conn.execute("SELECT * FROM filings ORDER BY published_at ASC").fetchall()
+    sql = "SELECT * FROM filings"
+    clauses, params = [], []
+    if instrument_id is not None:
+        clauses.append("instrument_id = ?")
+        params.append(instrument_id)
+    if only_unprocessed:
+        clauses.append("processed = 0")
+    if max_attempts is not None:
+        clauses.append("attempts < ?")
+        params.append(max_attempts)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY published_at ASC"
+    rows = conn.execute(sql, params).fetchall()
     return [r for r in rows if datetime.fromisoformat(r["published_at"]) <= cutoff]
+
+
+def mark_processed(conn: sqlite3.Connection, filing_ids) -> int:
+    """Flag filings as consumed by the LLM pipeline (idempotent).
+
+    Only flips `processed` 0 -> 1; never mutates point-in-time timestamps.
+    Call this ONLY after the derived feature has been persisted. Returns the
+    number of rows newly flipped.
+    """
+    ids = [int(i) for i in filing_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"UPDATE filings SET processed = 1 WHERE id IN ({placeholders}) AND processed = 0",
+        ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def bump_attempts(conn: sqlite3.Connection, filing_ids) -> int:
+    """Increment the LLM-pipeline attempt counter for filings (failure tracking).
+
+    Used when a filing was read but no feature could be persisted (malformed
+    research/synthesis), so a bounded number of retries happens before giving up
+    WITHOUT marking it processed (which would hide a never-featured filing).
+    """
+    ids = [int(i) for i in filing_ids]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"UPDATE filings SET attempts = attempts + 1 WHERE id IN ({placeholders})",
+        ids,
+    )
+    conn.commit()
+    return cur.rowcount

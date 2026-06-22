@@ -1,0 +1,43 @@
+# Trend + momentum WITH an LLM feature gate. Identical risk/exit to the baseline
+# (trend_momentum.yaml); the ONLY difference is an extra entry condition on
+# `llm_score`, the point-in-time feature derived from the LLM synthesis verdict.
+#
+# The LLM is only an INPUT: it can BLOCK or PERMIT an entry the deterministic
+# rules already allow; it never sizes, never sets stops, never moves money.
+# If no llm_score exists for a name on date T, the condition fails (no guessing)
+# and the name is simply not entered -- a safe default.
+
+name: trend_momentum_llm
+version: 1
+universe: wig20
+
+# Entry: baseline trend+momentum AND a non-negative LLM score.
+entry:
+  all:
+    - feature: close_vs_sma200
+      op: gt
+      value: 0.0
+    - feature: momentum_6m
+      op: gt
+      value: 0.0
+    - feature: llm_score        # [-1, 1] from synthesis verdict*conviction
+      op: gte
+      value: 0.0
+
+# Exit: identical to baseline (ATR trailing stop OR trend break).
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: close_vs_sma200
+      op: lt
+      value: 0.0
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

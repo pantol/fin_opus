@@ -98,6 +98,65 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     exposure REAL NOT NULL,
     PRIMARY KEY (user_id, date)
 );
+
+-- ---------------------------------------------------------------------------
+-- Phase 2: LLM FEATURES layer. The LLM is ALWAYS only an INPUT to the
+-- deterministic risk layer (CLAUDE.md rule 1). Nothing here computes money.
+-- ---------------------------------------------------------------------------
+
+-- Point-in-time fundamentals. as_of_date = date the figure became public
+-- (report publication), NOT the fiscal period it describes. Numbers are
+-- computed/sourced by deterministic code; the LLM only receives them as text.
+CREATE TABLE IF NOT EXISTS fundamentals (
+    instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+    as_of_date    TEXT NOT NULL,    -- availability date (ISO)
+    period        TEXT,             -- fiscal period label, e.g. 2023Q4
+    pe            REAL,
+    pb            REAL,
+    roe           REAL,
+    debt_equity   REAL,
+    revenue_yoy   REAL,
+    PRIMARY KEY (instrument_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_fundamentals_asof ON fundamentals(instrument_id, as_of_date);
+
+-- Audit trail for every LLM call (reproducibility, CLAUDE.md rule 8):
+-- served provider + model + generation id + cache hit are logged on EVERY call.
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id            INTEGER PRIMARY KEY,
+    created_at    TEXT NOT NULL,
+    role          TEXT NOT NULL,        -- extraction / synthesis
+    requested_model TEXT NOT NULL,
+    served_model  TEXT,                 -- model the provider actually served
+    served_provider TEXT,              -- provider name from response
+    generation_id TEXT,                 -- OpenRouter generation id
+    input_hash    TEXT NOT NULL,        -- sha256(model+params+prompt)
+    cached_tokens INTEGER,              -- usage.prompt_tokens_details.cached_tokens
+    cache_hit     INTEGER NOT NULL DEFAULT 0   -- local cache hit (no network)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_hash ON llm_calls(input_hash);
+
+-- Local content-addressed cache (cache by input hash). A hit returns stored
+-- JSON WITHOUT any network call, keeping backtests deterministic on replay.
+CREATE TABLE IF NOT EXISTS llm_cache (
+    input_hash  TEXT PRIMARY KEY,
+    response_json TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+-- Materialized point-in-time LLM features per (instrument, as_of_date). The
+-- backtest reads these deterministically; llm_score is the ONLY value injected
+-- into the strategy feature snapshot.
+CREATE TABLE IF NOT EXISTS llm_features (
+    instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+    as_of_date    TEXT NOT NULL,    -- decision date the feature is valid for
+    llm_score     REAL,             -- [-1, 1], derived from synthesis verdict/conviction
+    research_json TEXT,
+    synthesis_json TEXT,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (instrument_id, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_features_asof ON llm_features(instrument_id, as_of_date);
 """
 
 

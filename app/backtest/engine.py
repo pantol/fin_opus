@@ -49,6 +49,10 @@ class Instrument:
     delisted_on: str | None
     prices: pd.DataFrame      # full history (date-indexed)
     features: pd.DataFrame    # precomputed feature panel (date-indexed)
+    # Optional point-in-time LLM scores (date-indexed Series in [-1, 1]).
+    # When present, the as-of value is injected as `llm_score` into the snapshot.
+    # The LLM is ALWAYS only an INPUT here -- sizing/risk stays deterministic.
+    llm_scores: pd.Series | None = None
 
 
 @dataclass
@@ -248,6 +252,12 @@ def run_backtest(
             close = snap.get("close")
             if close is None:
                 continue
+            # Inject the point-in-time LLM score (only data with date <= T) as a
+            # plain feature. It feeds the YAML rule like any other feature; sizing
+            # and risk remain deterministic (CLAUDE.md rule 1).
+            llm_score = _llm_score_on(inst, day)
+            if llm_score is not None:
+                snap["llm_score"] = llm_score
 
             in_pos = inst.ticker in positions
             has_pending_buy = inst.ticker in pending_buys
@@ -376,6 +386,58 @@ def _feature_on(inst: Instrument, day: pd.Timestamp, name: str):
         val = inst.features.at[day, name]
         return None if pd.isna(val) else float(val)
     return None
+
+
+def _llm_score_on(inst: Instrument, day: pd.Timestamp):
+    """Point-in-time LLM score: the last score with date <= `day`, or None.
+
+    No look-ahead: a score materialized for a later date is never visible at T.
+    """
+    scores = inst.llm_scores
+    if scores is None or scores.empty:
+        return None
+    eligible = scores.loc[scores.index <= day]
+    if eligible.empty:
+        return None
+    val = eligible.iloc[-1]
+    return None if pd.isna(val) else float(val)
+
+
+def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
+    """True if any condition in the strategy config references the `llm_score`
+    feature. Used to decide whether to attach materialized LLM scores before a
+    plain backtest (so an LLM strategy is not silently starved of its gate).
+    """
+    def _walk(node) -> bool:
+        if isinstance(node, dict):
+            if node.get("feature") == "llm_score":
+                return True
+            return any(_walk(v) for v in node.values())
+        if isinstance(node, (list, tuple)):
+            return any(_walk(v) for v in node)
+        return False
+
+    return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+
+
+def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
+    """Return copies of `instruments` carrying point-in-time `llm_scores` read
+    deterministically from materialized `llm_features` (no LLM call here).
+    """
+    from app.llm import pipeline  # local import: keeps engine LLM-free at import
+
+    out: list[Instrument] = []
+    for inst in instruments:
+        scores = pipeline.load_llm_scores(conn, inst.instrument_id)
+        out.append(
+            Instrument(
+                instrument_id=inst.instrument_id, ticker=inst.ticker,
+                sector=inst.sector, listed_from=inst.listed_from,
+                delisted_on=inst.delisted_on, prices=inst.prices,
+                features=inst.features, llm_scores=scores,
+            )
+        )
+    return out
 
 
 def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, decisions_log):

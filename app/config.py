@@ -31,3 +31,7 @@ def load_strategy(name: str) -> dict[str, Any]:
 
 def load_news_sources() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "news_sources.yaml")
+
+
+def load_llm_config() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "llm.yaml")

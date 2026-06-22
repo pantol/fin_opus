@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline collect collect-loop clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline collect collect-loop clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -27,6 +27,14 @@ backtest: ingest
 # Same chain but with deterministic DEMO data (offline; NOT real prices).
 backtest-offline: ingest-offline
 	$(PYTHON) -m app.cli backtest
+
+# A/B: baseline vs baseline+LLM (reads pre-materialized LLM features; no LLM call).
+ab:
+	$(PYTHON) -m app.cli ab
+
+# A/B on deterministic DEMO data (offline; NOT real prices).
+ab-offline: ingest-offline
+	$(PYTHON) -m app.cli ab
 
 # ESPI/EBI + news collector (standalone, ZERO LLM). One-shot cycle.
 collect:

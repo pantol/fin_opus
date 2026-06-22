@@ -3,9 +3,10 @@
 > Living progress log for the GPW Decision System. **Update this file on every
 > implementation step** (new feature, fix, phase gate). Keep entries newest-first.
 
-**Current phase:** Phase 0+1 (deterministic core, no LLM) — **COMPLETE & green.**
-Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM).
-**Tests:** 78 passing.
+**Current phase:** Phase 2 (LLM FEATURES layer) — **plumbing COMPLETE & green;
+empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
+standalone ESPI/EBI collector remain complete. The LLM is ALWAYS only an INPUT;
+ZERO LLM in the money path. **Tests:** 121 passing.
 
 ---
 
@@ -15,7 +16,7 @@ Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM
 |-------|-------|--------|
 | 0 | Scaffold: `app/` package, config, db schema, Makefile, README | ✅ Done |
 | 1 | Data + features + 1 strategy + full risk + backtest + log + Telegram stub (no LLM) | ✅ Done |
-| 2 | LLM via OpenRouter as *features* (regime radar / turning points) | ⬜ Not started |
+| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done (121 green); A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
 | 3 | Regime radar / turning points | ⬜ Not started |
 | 4 | Academic strategies (more YAML, same engine) | ⬜ Not started |
 | 5 | Survey / user profile | ⬜ Not started |
@@ -50,6 +51,22 @@ Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM
 - [x] **Tests** (`tests/test_news_collector.py`) — dedup (incl. earliest-wins regardless of feed order), idempotency, point-in-time/tz, ISIN mapping, resilience, health/exit-code, timestamp formats (18 tests).
 - [x] **VPS deploy docs** — README cron + systemd + health verification.
 
+## Component checklist (Phase 2 — LLM features, LLM is only an INPUT)
+
+- [x] **Skill** (`.claude/skills/llm-provider-routing/SKILL.md`) — pinned provider, logged served provider+model+gen-id, cache via cached_tokens, cost routing, validated JSON, LLM-as-input rule.
+- [x] **Config** (`config/llm.yaml`) — base URL, cheap-extraction / pricier-synthesis models, pinned provider (`allow_fallbacks:false`), low temp, cache; loader `cfg.load_llm_config()`.
+- [x] **DB tables** (`app/db.py`) — `fundamentals`, `llm_calls` (audit), `llm_cache`, `llm_features`; all idempotent.
+- [x] **LLM client** (`app/llm/client.py`) — OpenRouter wrapper, injectable transport, cache-by-input-hash (hit = no network), logs served provider+model+gen-id+cached_tokens on EVERY call, key from `OPENROUTER_API_KEY`.
+- [x] **Schemas** (`app/llm/schemas.py`) — strict jsonschema for research + synthesis; malformed REJECTED (no guessing).
+- [x] **Research Agent** (`app/llm/research.py`) — filing TEXT → validated research JSON; `evidence_quote` must appear in source else confidence lowered.
+- [x] **Fundamentals seam** (`app/features/fundamentals.py`) — point-in-time `load_fundamentals_asof` (as_of_date ≤ T); NUMBERS computed by code, passed to synthesis as context text only.
+- [x] **Synthesis/Judge** (`app/llm/synthesis.py`) — research + quant_score + fundamentals (context) → verdict JSON → `llm_score` ∈ [-1,1]; the ONLY value handed to the strategy/risk layer.
+- [x] **Pipeline** (`app/llm/pipeline.py`) — consume unprocessed filings (published_at ≤ T), research→synthesis, persist `llm_features`, mark filings processed; deterministic score loader for backtest.
+- [x] **Engine injection** (`app/backtest/engine.py`) — point-in-time `llm_score` injected into the feature snapshot; sizing/risk byte-for-byte unchanged.
+- [x] **LLM strategy** (`config/strategies/trend_momentum_llm.yaml`) — baseline + one `llm_score >= 0` entry gate (can veto/permit, never sizes).
+- [x] **A/B harness** (`app/backtest/ab_harness.py`) — same engine/costs/OOS/WIG20TR; baseline vs +LLM; honest gate (Sharpe up, Sortino & maxDD not worse). CLI `ab`, `make ab` / `make ab-offline`.
+- [x] **`mark_processed`** (`app/ingestion/filings_db.py`) — idempotent; `select_filings_asof` gains `instrument_id` + `only_unprocessed` filters.
+
 ## Invariants (enforced by tests)
 
 - [x] Point-in-time / no look-ahead (`tests/test_point_in_time.py`)
@@ -58,11 +75,56 @@ Plus standalone ESPI/EBI + news collector (Phase-2 data plumbing, still ZERO LLM
 - [x] Realistic fills: buy@ask / sell@bid + costs + volume cap (`tests/test_fills.py`)
 - [x] Walk-forward OOS vs WIG20TR (never SPY)
 - [x] Multi-tenant `user_id` seam on decisions/positions/trades/equity
-- [x] ZERO LLM in the money path
+- [x] ZERO LLM in the money path (A/B: with permissive scores, +LLM metrics == baseline, delta≈0 — proves the LLM is a pure gate, `tests/test_ab_harness.py`)
+- [x] LLM output validated; malformed rejected, not guessed (`tests/test_llm_schemas.py`)
+- [x] LLM reproducibility: served provider+model+gen-id logged every call; cache hit = no 2nd network call (`tests/test_llm_client.py`)
+- [x] Point-in-time for filings AND fundamentals feeding synthesis (`tests/test_llm_pipeline.py`, `tests/test_llm_synthesis.py`, `tests/test_fundamentals.py`)
+- [x] `evidence_quote` must appear in source else confidence lowered (`tests/test_llm_research.py`)
 
 ---
 
 ## Changelog (newest first)
+
+### 2026-06-22 — Phase 2 review fixes (PIT tz, persist-then-mark, CLI gate, provider audit)
+Code-review hardening of the Phase-2 LLM features layer. 121 tests green
+(+8); offline A/B still honestly reports NO improvement (no filings → gate
+blocks all entries). Still ZERO LLM in the money path.
+- **P1 (point-in-time tz):** filing cutoff now uses Europe/Warsaw local
+  end-of-day (`datetime.combine(... time(23,59,59), tzinfo=Warsaw)`), so an
+  01:30 CEST filing counts for its OWN local day instead of leaking into the
+  prior UTC day. New boundary test.
+- **P2 (integrity):** filings are marked `processed` ONLY after the
+  `llm_features` row is persisted. A rejected research/synthesis bumps a new
+  `attempts` column instead; a filing is retired (marked processed, no feature)
+  only after `MAX_ATTEMPTS`, so a malformed item is neither hidden nor retried
+  forever. `select_filings_asof` gains a `max_attempts` filter.
+- **P2 (CLI gate):** `backtest --strategy trend_momentum_llm` now attaches
+  materialized `llm_scores` when the strategy references `llm_score`
+  (`engine.strategy_uses_llm_score` + shared `engine.attach_llm_scores`);
+  previously only the A/B harness did, so the LLM strategy silently took no
+  entries.
+- **P2 (provider audit):** the served provider is fetched from the OpenRouter
+  generation-metadata endpoint (the chat response omits it) via an injectable
+  GET transport; resolved provider is cached so a cache hit keeps it; honest
+  NULL on failure (never guessed).
+
+### 2026-06-22 — Phase 2: LLM FEATURES layer + A/B harness (LLM = INPUT only)
+Full Phase-2 plumbing, 113 tests green. The LLM never touches sizing/risk/
+execution: it produces validated JSON that maps to a single `llm_score` feeding
+the existing deterministic strategy/risk engine.
+- `app/llm/`: client (pinned provider, cache-by-hash, audited), schemas
+  (strict; malformed rejected), research agent (evidence check), synthesis judge
+  (quant+fundamentals as context text), pipeline (point-in-time filing
+  consumption → `llm_features`, marks processed).
+- Point-in-time fundamentals seam (`app/features/fundamentals.py`).
+- Engine injects point-in-time `llm_score`; `trend_momentum_llm.yaml` adds one
+  `llm_score >= 0` gate. A/B harness + CLI `ab` + `make ab`.
+- DB: `fundamentals`, `llm_calls`, `llm_cache`, `llm_features` (idempotent).
+- **HONEST GATE STATUS:** offline/demo data has no filings, so the LLM gate
+  blocks all entries (safe default) and the harness correctly reports NO
+  improvement. A real OOS A/B verdict requires live OpenRouter + real ESPI
+  filings; the harness/gate are proven, the empirical win is NOT yet shown.
+  Reported honestly per CLAUDE.md — not faked.
 
 ### 2026-06-20 — Collector review fixes (dedup order, health, ISIN, timestamps)
 Code-review hardening of the collector. 78 tests green; ISIN seam verified

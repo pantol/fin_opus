@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline collect collect-loop clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -35,6 +35,12 @@ ab:
 # A/B on deterministic DEMO data (offline; NOT real prices).
 ab-offline: ingest-offline
 	$(PYTHON) -m app.cli ab
+
+# Materialize point-in-time LLM features from collected filings (calls
+# OpenRouter; needs OPENROUTER_API_KEY). backtest/ab then read the
+# materialized rows with NO LLM call — the LLM is only an INPUT.
+llm:
+	$(PYTHON) -m app.cli llm
 
 # ESPI/EBI + news collector (standalone, ZERO LLM). One-shot cycle.
 collect:

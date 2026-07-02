@@ -25,15 +25,41 @@ from app.logging import decisions as declog
 
 
 def cmd_ingest(args) -> int:
+    from datetime import date, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
     if args.offline:
         print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
         report = demo.ingest_offline(conn, universe)
-    else:
+    elif args.source == "stooq":
         print("Ingesting from Stooq (this hits the network)...")
         report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
+    else:  # gpw (default): official session archive + GPW Benchmark indices
+        from app.ingestion import gpw_archive
+
+        today = datetime.now(ZoneInfo("Europe/Warsaw")).date()
+        end = date.fromisoformat(args.end) if args.end else today
+        if args.start:
+            start = date.fromisoformat(args.start)
+        else:
+            # Incremental: resume after the last stored bar; fresh DB -> 90 days.
+            row = conn.execute(
+                "SELECT MAX(date) FROM prices WHERE adjusted = 0").fetchone()
+            start = (date.fromisoformat(row[0]) + timedelta(days=1)
+                     if row and row[0] else end - timedelta(days=90))
+        if start > end:
+            print(f"Already up to date (last bar {start - timedelta(days=1)}).")
+            conn.close()
+            return 0
+        n_days = (end - start).days + 1
+        print(f"Ingesting from GPW archive: {start} .. {end} "
+              f"({n_days} calendar days, ~1 request/session day"
+              f"{', FULL market' if args.full else ', universe only'})...")
+        report = gpw_archive.ingest_range(conn, universe, start, end,
+                                          full_market=args.full)
     total = sum(report.counts.values())
     print(f"Ingested {total} bars across {len(report.counts)} tickers.")
     for tk, n in sorted(report.counts.items()):
@@ -278,9 +304,18 @@ def main(argv=None) -> int:
     parser.add_argument("--db", default=None, help="SQLite path (default: data/gpw.db)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ing = sub.add_parser("ingest", help="Fetch EOD data from Stooq into SQLite")
+    ing = sub.add_parser("ingest", help="Fetch EOD data into SQLite (GPW archive by default)")
     ing.add_argument("--offline", action="store_true",
-                     help="Use deterministic DEMO data instead of live Stooq (NOT real prices)")
+                     help="Use deterministic DEMO data instead of a live source (NOT real prices)")
+    ing.add_argument("--source", choices=["gpw", "stooq"], default="gpw",
+                     help="Live source: GPW official archive (default) or Stooq CSV "
+                          "(login-gated as of 2026)")
+    ing.add_argument("--start", default=None,
+                     help="Backfill start date (ISO). Default: resume after the last stored bar")
+    ing.add_argument("--end", default=None, help="End date (ISO). Default: today (Warsaw)")
+    ing.add_argument("--full", action="store_true",
+                     help="GPW source: store EVERY PLN instrument found (anti-survivorship "
+                          "backfill), not just the configured universe")
     sub.add_parser("features", help="Compute and preview features")
     bt = sub.add_parser("backtest", help="Run walk-forward backtest vs WIG20TR")
     bt.add_argument("--strategy", default="trend_momentum")

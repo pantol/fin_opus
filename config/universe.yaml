@@ -31,9 +31,15 @@ instruments:
   - { ticker: lpp,  name: LPP,           sector: retail,     isin: PLLPP0000011, listed_from: 2001-05-16 }
   - { ticker: opl,  name: Orange Polska, sector: telecom,    isin: PLTLKPL00017, listed_from: 1998-11-18 }
 
+  # GTC and Boryszew were previously listed here as delisted, but GPW session
+  # files show BOTH still trading (verified 2026-07-01: GTC close 2.38,
+  # BORYSZEW close 5.01) — the old delisted_on dates were wrong.
+  - { ticker: gtc,  name: GTC,           sector: real_estate, isin: PLGTC0000037, listed_from: 2004-05-06 }
+  - { ticker: brs,  name: Boryszew,      sector: materials,   isin: PLBRSZW00011, listed_from: 1996-01-15 }
+
   # --- delisted / dead tickers (anti-survivorship) ---
-  - { ticker: gtc,  name: GTC,                sector: real_estate, listed_from: 2004-05-06, delisted_on: 2023-11-30 }
-  - { ticker: brs,  name: Boryszew,           sector: materials,   listed_from: 1996-01-15, delisted_on: 2022-12-31 }
-  - { ticker: gnb,  name: Getin Noble Bank,   sector: banking,     listed_from: 2008-01-02, delisted_on: 2023-10-02 }
-  - { ticker: ple,  name: Petrolinvest,       sector: energy,      listed_from: 2007-07-31, delisted_on: 2018-06-30 }
-  - { ticker: bph,  name: BPH,                sector: banking,     listed_from: 1995-01-24, delisted_on: 2016-11-04 }
+  # ISINs sourced from GPW's own archival session files (archiwum-notowan),
+  # not guessed: BANKBPH@2016-06-01, PETROLINV@2014-06-02, GETINOBLE@2022-06-01.
+  - { ticker: gnb,  name: Getin Noble Bank,   sector: banking,     isin: PLGETBK00012, listed_from: 2008-01-02, delisted_on: 2023-10-02 }
+  - { ticker: ple,  name: Petrolinvest,       sector: energy,      isin: PLPTRLI00018, listed_from: 2007-07-31, delisted_on: 2018-06-30 }
+  - { ticker: bph,  name: BPH,                sector: banking,     isin: PLBPH0000019, listed_from: 1995-01-24, delisted_on: 2016-11-04 }

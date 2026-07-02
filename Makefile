@@ -17,6 +17,13 @@ ingest:
 ingest-offline:
 	$(PYTHON) -m app.cli ingest --offline
 
+# Deep anti-survivorship backfill from the GPW archive: every PLN instrument
+# in every session file (dead companies included). ~1 request/second per
+# session day — a multi-year range takes HOURS; run it once, then plain
+# `make ingest` stays incremental.
+backfill:
+	$(PYTHON) -m app.cli ingest --full --start 2015-01-02
+
 features:
 	$(PYTHON) -m app.cli features
 

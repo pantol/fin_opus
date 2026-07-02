@@ -6,10 +6,16 @@
 #
 # ZERO LLM: this is plumbing only. The LLM (Phase 2) only READS what is stored.
 #
-# IMPORTANT: the `url` values are PLACEHOLDERS. Do NOT trust invented .xml URLs.
-# Copy the EXACT channel feed URL from each provider's RSS page (links below)
-# and paste it in. A feed whose url is still a PLACEHOLDER_* token is skipped at
-# runtime with a warning (so an un-pasted feed never crashes a cycle).
+# All enabled URLs below were VERIFIED live on 2026-07-02 (real RSS with
+# <item> elements and parseable publication timestamps). Feed windows are
+# short (hours, not days) — keep the poll interval tight; there is NO
+# historical backfill via RSS, so history starts when the collector starts.
+#
+# timezone_override: bankier.pl (and gpw.pl) label Warsaw wall-clock time with
+# a fixed "+0100" offset year-round, which is wrong in summer (CEST = +0200).
+# The override discards the stated offset and interprets the wall-clock in the
+# given zone — correct in both winter and summer. Feeds with correct offsets
+# (PAP: true UTC) must NOT set it.
 
 db_path: null                 # null -> use the main app DB (data/gpw.db)
 poll_interval_minutes: 10     # scheduler interval for the --loop runner
@@ -18,30 +24,46 @@ fetch_full_text: true         # fetch the article/filing body from each item url
 user_agent: "gpw-decision-system news collector (+set-your-contact@example.com)"
 
 feeds:
-  # GPW main market — ESPI / komunikaty channel.
-  # Copy the exact channel feed URL from: https://www.gpw.pl/_rss
-  - name: gpw_espi
-    enabled: true
-    type: ESPI                # default espi_ebi_type when an item doesn't say
-    url: "PLACEHOLDER_GPW_ESPI_RSS_URL"
-
-  # NewConnect / GlobalConnect — komunikaty channel.
-  # Copy the exact channel feed URL from: https://gpwglobalconnect.pl/_rss
-  - name: newconnect
-    enabled: true
-    type: EBI
-    url: "PLACEHOLDER_NEWCONNECT_RSS_URL"
-
-  # Bankier "Komunikaty ze spolek" — ESPI/EBI channel.
-  # Copy the exact channel feed URL from: https://www.bankier.pl/rss
+  # Bankier "Komunikaty ze spolek" — mixed ESPI (main market) + EBI
+  # (NewConnect). RFC-822 pubDate with the mislabeled +0100 quirk (override).
+  # Titles: "COMPANY S.A.: subject"; no report numbers / ISINs in the feed.
   - name: bankier_espi_ebi
     enabled: true
-    type: null               # type detected per-item from the title when possible
-    url: "PLACEHOLDER_BANKIER_RSS_URL"
+    type: null                # type detected per-item when possible
+    timezone_override: Europe/Warsaw
+    url: "https://www.bankier.pl/rss/espi.xml"
 
-  # --- Add more sources later (copy the EXACT feed URL, do not invent one). ---
-  # PAP Biznes / ESPI:
-  # - name: pap
-  #   enabled: false
-  #   type: null
-  #   url: "PLACEHOLDER_PAP_RSS_URL"
+  # StockWatch "Komunikaty spolek" — ESPI + EBI. pubDate is a NAIVE
+  # "YYYY-MM-DD HH:MM" (Warsaw local; parser interprets naive as Warsaw).
+  # The link slug carries an explicit ",espi,"/",ebi," marker + PAP report id,
+  # which type detection reads from the URL. Do NOT set type=ESPI/EBI query
+  # params on this endpoint — they break it; leave them empty.
+  - name: stockwatch_espi_ebi
+    enabled: true
+    type: null
+    url: "https://www.stockwatch.pl/komunikaty-spolek/rss.aspx?type=&c=&t="
+
+  # PAP Biznes — newswire + ESPI/EBI report items interleaved. Correct
+  # RFC-822 UTC timestamps (no override). Report items carry the report
+  # number in the title, e.g. "QUERCUS TFI S.A. (14/2026) ...". Short window
+  # (~25 items / few hours).
+  - name: pap_biznes
+    enabled: true
+    type: null
+    url: "https://biznes.pap.pl/rss"
+
+  # --- Optional extras (exchange-OPERATOR communiques, not company filings:
+  # suspensions, alert list, index notices). Disabled by default; enable if
+  # the strategy should react to trading suspensions. gpw.pl is WAF-sensitive
+  # (needs the browser-like headers the collector already sends) and has the
+  # same +0100 offset quirk.
+  - name: gpw_komunikaty
+    enabled: false
+    type: null
+    timezone_override: Europe/Warsaw
+    url: "https://www.gpw.pl/rss_komunikaty"
+  - name: newconnect_komunikaty
+    enabled: false
+    type: EBI
+    timezone_override: Europe/Warsaw
+    url: "https://newconnect.pl/rss_komunikaty"

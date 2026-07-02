@@ -25,27 +25,56 @@ from app.logging import decisions as declog
 
 
 def cmd_ingest(args) -> int:
+    from datetime import date, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
     if args.offline:
         print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
-        counts = demo.ingest_offline(conn, universe)
-    else:
+        report = demo.ingest_offline(conn, universe)
+    elif args.source == "stooq":
         print("Ingesting from Stooq (this hits the network)...")
-        try:
-            counts = stooq.ingest_universe(conn, universe)
-        except stooq.StooqUnavailableError as exc:
-            print(f"ERROR: {exc}")
-            print("Stooq is blocking automated CSV access from this network.")
+        report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
+    else:  # gpw (default): official session archive + GPW Benchmark indices
+        from app.ingestion import gpw_archive
+
+        today = datetime.now(ZoneInfo("Europe/Warsaw")).date()
+        end = date.fromisoformat(args.end) if args.end else today
+        if args.start:
+            start = date.fromisoformat(args.start)
+        else:
+            # Incremental: resume after the last stored bar; fresh DB -> 90 days.
+            row = conn.execute(
+                "SELECT MAX(date) FROM prices WHERE adjusted = 0").fetchone()
+            start = (date.fromisoformat(row[0]) + timedelta(days=1)
+                     if row and row[0] else end - timedelta(days=90))
+        if start > end:
+            print(f"Already up to date (last bar {start - timedelta(days=1)}).")
+            conn.close()
+            return 0
+        n_days = (end - start).days + 1
+        print(f"Ingesting from GPW archive: {start} .. {end} "
+              f"({n_days} calendar days, ~1 request/session day"
+              f"{', FULL market' if args.full else ', universe only'})...")
+        report = gpw_archive.ingest_range(conn, universe, start, end,
+                                          full_market=args.full)
+    total = sum(report.counts.values())
+    print(f"Ingested {total} bars across {len(report.counts)} tickers.")
+    for tk, n in sorted(report.counts.items()):
+        print(f"  {tk:10s} {n:6d} bars")
+    if report.failures:
+        print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
+        for tk, reason in sorted(report.failures.items()):
+            print(f"  {tk:10s} {reason}")
+        if not report.counts:
+            print("\nStooq is refusing automated CSV access from this network "
+                  "(bot-check / 'Access denied' / daily limit).")
             print("Retry later from a normal connection, or use: "
                   "python -m app.cli ingest --offline  (demo data only).")
-            conn.close()
-            return 2
-    total = sum(counts.values())
-    print(f"Ingested {total} bars across {len(counts)} tickers.")
-    for tk, n in sorted(counts.items()):
-        print(f"  {tk:10s} {n:6d} bars")
+        conn.close()
+        return 2
     conn.close()
     return 0
 
@@ -109,6 +138,101 @@ def cmd_backtest(args) -> int:
     _print_metrics_table(result, bt_cfg["walk_forward"]["benchmark"])
     conn.close()
     return 0
+
+
+def cmd_llm(args) -> int:
+    """Materialize point-in-time LLM features from unprocessed filings.
+
+    TEXT (filings) goes to the LLM (research -> judge, validated JSON);
+    NUMBERS (the deterministic quant context, here momentum_6m from the
+    point-in-time feature panel) enter the prompt as context text only.
+    The output is one llm_score per (instrument, as_of_date) in
+    `llm_features`; the backtest later reads those rows with NO LLM call.
+    """
+    import os
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("ERROR: OPENROUTER_API_KEY is not set (see .env.example); "
+              "cannot call OpenRouter.")
+        return 2
+
+    # Local imports: only this command touches the LLM layer, keeping the
+    # ingest/backtest commands import-clean of app.llm (money-path audit).
+    from app.features import compute
+    from app.llm import pipeline as llm_pipeline
+    from app.llm.client import LLMClient
+
+    conn = connect(args.db)
+    init_db(conn)
+    universe = cfg.load_universe()
+    client = LLMClient(conn, cfg.load_llm_config())
+
+    as_of = args.date or datetime.now(ZoneInfo("Europe/Warsaw")).date().isoformat()
+    entries = universe.get("instruments", [])
+    if args.ticker:
+        entries = [e for e in entries if e["ticker"].lower() == args.ticker.lower()]
+        if not entries:
+            print(f"Ticker '{args.ticker}' is not in the universe.")
+            conn.close()
+            return 1
+
+    print(f"Materializing LLM features as of {as_of} "
+          f"(filings cutoff: end of day, Europe/Warsaw)...")
+    n_features = n_nothing = 0
+    for entry in entries:
+        ticker = entry["ticker"].lower()
+        row = conn.execute(
+            "SELECT id FROM instruments WHERE ticker = ?", (ticker,)
+        ).fetchone()
+        if row is None:
+            print(f"  {ticker:10s} not ingested (run `make ingest` first) — skipped")
+            n_nothing += 1
+            continue
+        inst_id = int(row["id"])
+
+        # Deterministic quant context (point-in-time; passed as text only).
+        quant_score = None
+        prices = compute.load_prices_asof(conn, inst_id, as_of)
+        if not prices.empty:
+            snap = compute.features_at(compute.compute_features(prices), as_of)
+            if snap:
+                quant_score = snap.get("momentum_6m")
+
+        verdict = llm_pipeline.compute_feature_for_date(
+            conn, client, instrument_id=inst_id, ticker=ticker,
+            as_of_date=as_of, quant_score=quant_score,
+        )
+        if verdict is None:
+            n_nothing += 1  # no unprocessed filings, or rejected (logged)
+        else:
+            n_features += 1
+            print(f"  {ticker:10s} llm_score={verdict['llm_score']:+.3f} "
+                  f"({verdict['verdict']}, conviction={verdict['conviction']:.2f})")
+
+    print(f"\nMaterialized {n_features} feature rows; "
+          f"{n_nothing} instruments had nothing to process.")
+    _print_llm_audit(conn)
+    conn.close()
+    return 0
+
+
+def _print_llm_audit(conn, limit: int = 10) -> None:
+    """Reproducibility audit: served provider/model/generation id per call."""
+    rows = conn.execute(
+        "SELECT created_at, role, served_model, served_provider, generation_id,"
+        " cached_tokens, cache_hit FROM llm_calls ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    if not rows:
+        return
+    print("\nProvider audit (latest llm_calls):")
+    for r in rows:
+        print(f"  {r['created_at'][:19]} {r['role']:<10} "
+              f"model={r['served_model']} provider={r['served_provider']} "
+              f"gen={r['generation_id']} cache_hit={r['cache_hit']} "
+              f"cached_tokens={r['cached_tokens']}")
 
 
 def cmd_ab(args) -> int:
@@ -180,15 +304,30 @@ def main(argv=None) -> int:
     parser.add_argument("--db", default=None, help="SQLite path (default: data/gpw.db)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    ing = sub.add_parser("ingest", help="Fetch EOD data from Stooq into SQLite")
+    ing = sub.add_parser("ingest", help="Fetch EOD data into SQLite (GPW archive by default)")
     ing.add_argument("--offline", action="store_true",
-                     help="Use deterministic DEMO data instead of live Stooq (NOT real prices)")
+                     help="Use deterministic DEMO data instead of a live source (NOT real prices)")
+    ing.add_argument("--source", choices=["gpw", "stooq"], default="gpw",
+                     help="Live source: GPW official archive (default) or Stooq CSV "
+                          "(login-gated as of 2026)")
+    ing.add_argument("--start", default=None,
+                     help="Backfill start date (ISO). Default: resume after the last stored bar")
+    ing.add_argument("--end", default=None, help="End date (ISO). Default: today (Warsaw)")
+    ing.add_argument("--full", action="store_true",
+                     help="GPW source: store EVERY PLN instrument found (anti-survivorship "
+                          "backfill), not just the configured universe")
     sub.add_parser("features", help="Compute and preview features")
     bt = sub.add_parser("backtest", help="Run walk-forward backtest vs WIG20TR")
     bt.add_argument("--strategy", default="trend_momentum")
     ab = sub.add_parser("ab", help="A/B: baseline vs baseline+LLM (OOS, uses materialized LLM features)")
     ab.add_argument("--baseline", default="trend_momentum")
     ab.add_argument("--llm", default="trend_momentum_llm")
+    llm = sub.add_parser(
+        "llm", help="Materialize point-in-time LLM features from filings (calls OpenRouter)")
+    llm.add_argument("--date", default=None,
+                     help="Decision date T (ISO; default: today in Europe/Warsaw)")
+    llm.add_argument("--ticker", default=None,
+                     help="Restrict to one ticker (default: all universe instruments)")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -199,6 +338,8 @@ def main(argv=None) -> int:
         return cmd_backtest(args)
     if args.command == "ab":
         return cmd_ab(args)
+    if args.command == "llm":
+        return cmd_llm(args)
     return 1
 
 

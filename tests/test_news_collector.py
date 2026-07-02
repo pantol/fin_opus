@@ -409,3 +409,138 @@ def test_parse_datetime_named_cest():
 def test_parse_datetime_gmt():
     dt = news_collector.parse_datetime("Mon, 06 May 2024 09:00:00 GMT")
     assert dt.astimezone(UTC) == datetime(2024, 5, 6, 9, 0, tzinfo=UTC)
+
+
+def test_parse_datetime_naive_space_separated_assumes_warsaw():
+    # stockwatch.pl format: naive "YYYY-MM-DD HH:MM" (Warsaw local).
+    # 02 Jul is CEST (+02:00) -> 07:54 Warsaw == 05:54 UTC.
+    dt = news_collector.parse_datetime("2026-07-02 07:54")
+    assert dt.astimezone(UTC) == datetime(2026, 7, 2, 5, 54, tzinfo=UTC)
+
+
+def test_parse_datetime_tz_override_discards_mislabeled_offset():
+    # bankier.pl/gpw.pl label Warsaw wall-clock with "+0100" year-round.
+    # In July the true zone is CEST: 07:21 Warsaw == 05:21 UTC.
+    raw = "Thu, 2 Jul 2026 07:21:00 +0100"
+    with_override = news_collector.parse_datetime(
+        raw, tz_override=news_collector.WARSAW)
+    assert with_override.astimezone(UTC) == datetime(2026, 7, 2, 5, 21, tzinfo=UTC)
+    # Without the override the stated offset is trusted (1h later instant).
+    without = news_collector.parse_datetime(raw)
+    assert without.astimezone(UTC) == datetime(2026, 7, 2, 6, 21, tzinfo=UTC)
+
+
+def test_parse_datetime_tz_override_agrees_in_winter():
+    # In winter Warsaw IS +0100, so override and stated offset agree.
+    raw = "Tue, 02 Jan 2024 09:00:00 +0100"
+    with_override = news_collector.parse_datetime(
+        raw, tz_override=news_collector.WARSAW)
+    assert with_override.astimezone(UTC) == datetime(2024, 1, 2, 8, 0, tzinfo=UTC)
+
+
+def test_extract_issuer_from_title_prefixes():
+    ex = news_collector.extract_issuer
+    assert ex("PCC ROKITA S.A.: zawarcie umowy") == "PCC ROKITA"        # bankier
+    assert ex("PRYMUS: Transakcje osob blisko zwiazanych") == "PRYMUS"  # stockwatch
+    assert ex("QUERCUS TFI S.A. (14/2026) Informacja o wycenie") == "QUERCUS TFI"  # PAP
+    assert ex("Apollo Capital ASI S.A.: raport") == "Apollo Capital"
+    # Plain news headline without an issuer prefix -> None, never a guess.
+    assert ex("Ceny miedzi w Londynie na stabilnym poziomie") is None
+    assert ex("") is None and ex(None) is None
+
+
+def test_resolve_instrument_by_name_exact_and_ambiguous(conn):
+    conn.execute("INSERT INTO instruments (ticker, name) VALUES ('prm', 'Prymus')")
+    conn.execute("INSERT INTO instruments (ticker, name) VALUES ('abc', 'ABC')")
+    conn.execute("INSERT INTO instruments (ticker, name) VALUES ('xyz', 'abc')")
+    conn.commit()
+    from app.ingestion import filings_db
+    iid = conn.execute("SELECT id FROM instruments WHERE ticker='prm'").fetchone()[0]
+    assert filings_db.resolve_instrument_id_by_name(conn, "PRYMUS") == iid
+    assert filings_db.resolve_instrument_id_by_name(conn, "prymus") == iid
+    # Ambiguous (ticker of one row, name of another) -> None, no guessing.
+    assert filings_db.resolve_instrument_id_by_name(conn, "ABC") is None
+    assert filings_db.resolve_instrument_id_by_name(conn, "nomatch") is None
+    assert filings_db.resolve_instrument_id_by_name(conn, None) is None
+
+
+def test_store_items_maps_instrument_by_title_prefix(conn):
+    conn.execute("INSERT INTO instruments (ticker, name) VALUES ('prm', 'Prymus')")
+    conn.commit()
+    iid = conn.execute("SELECT id FROM instruments WHERE ticker='prm'").fetchone()[0]
+    feed = {"name": "stockwatch_espi_ebi", "type": None, "url": "https://x/rss.aspx"}
+    rss = _rss([{
+        "title": "PRYMUS: Zawarcie znaczacej umowy",
+        "link": "https://x/prymus,espi,20260702_075422_0000353478",
+        "guid": "sw-map-1",
+        "pubDate": "2026-07-02 07:54",
+    }])
+    news_collector.run_cycle(conn, _config([feed]),
+                             fetch_feed=lambda url, *, user_agent, timeout: rss,
+                             fetch_full_text=_no_full_text)
+    row = conn.execute(
+        "SELECT instrument_id, issuer_name FROM filings WHERE dedup_key='sw-map-1'"
+    ).fetchone()
+    assert row["instrument_id"] == iid  # no ISIN in feed; resolved by name
+    assert row["issuer_name"] == "PRYMUS"
+
+
+def test_detect_type_from_stockwatch_link_slug():
+    # stockwatch titles carry no ESPI/EBI marker; the link slug does.
+    espi_url = ("https://www.stockwatch.pl/komunikaty-spolek/"
+                "prymus,espi,20260702_075422_0000353478")
+    ebi_url = ("https://www.stockwatch.pl/komunikaty-spolek/"
+               "apollo,ebi,20260701_234425_0000012345")
+    assert news_collector.detect_type(None, "PRYMUS: umowa", "", espi_url) == "ESPI"
+    assert news_collector.detect_type(None, "APOLLO: raport", "", ebi_url) == "EBI"
+
+
+def test_feed_timezone_override_applied_end_to_end(conn):
+    # A bankier-style feed with the mislabeled +0100 July offset: the stored
+    # published_at must reflect Warsaw wall-clock (05:21 UTC), not the offset.
+    feed = {
+        "name": "bankier_espi_ebi", "type": None,
+        "timezone_override": "Europe/Warsaw",
+        "url": "https://www.bankier.pl/rss/espi.xml",
+    }
+    rss = _rss([{
+        "title": "SPOLKA S.A.: zawarcie umowy",
+        "link": "https://www.bankier.pl/wiadomosc/x",
+        "guid": "bank-1",
+        "pubDate": "Thu, 2 Jul 2026 07:21:00 +0100",
+    }])
+
+    def fetch_feed(url, *, user_agent, timeout):
+        return rss
+
+    news_collector.run_cycle(conn, _config([feed]),
+                             fetch_feed=fetch_feed, fetch_full_text=_no_full_text)
+    row = conn.execute("SELECT published_at FROM filings").fetchone()
+    stored = datetime.fromisoformat(row["published_at"])
+    assert stored.astimezone(UTC) == datetime(2026, 7, 2, 5, 21, tzinfo=UTC)
+
+
+def test_stockwatch_style_feed_end_to_end(conn):
+    # Naive "YYYY-MM-DD HH:MM" pubDate + type from the link slug.
+    feed = {"name": "stockwatch_espi_ebi", "type": None,
+            "url": "https://www.stockwatch.pl/komunikaty-spolek/rss.aspx?type=&c=&t="}
+    rss = _rss([{
+        "title": "PRYMUS: Zawarcie znaczacej umowy",
+        "link": ("https://www.stockwatch.pl/komunikaty-spolek/"
+                 "prymus,espi,20260702_075422_0000353478"),
+        "guid": "sw-1",
+        "pubDate": "2026-07-02 07:54",
+    }])
+
+    def fetch_feed(url, *, user_agent, timeout):
+        return rss
+
+    stats = news_collector.run_cycle(conn, _config([feed]),
+                                     fetch_feed=fetch_feed,
+                                     fetch_full_text=_no_full_text)
+    assert stats.healthy and stats.new_items == 1
+    row = conn.execute(
+        "SELECT published_at, espi_ebi_type FROM filings").fetchone()
+    assert row["espi_ebi_type"] == "ESPI"
+    stored = datetime.fromisoformat(row["published_at"])
+    assert stored.astimezone(UTC) == datetime(2026, 7, 2, 5, 54, tzinfo=UTC)

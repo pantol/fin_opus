@@ -41,6 +41,12 @@ _TRAILING_ABBREV_RE = re.compile(r"\b(UTC|GMT|CET|CEST)\b\s*$", re.IGNORECASE)
 
 # ISIN: 2-letter country code + 9 alphanumerics + 1 check digit.
 _ISIN_RE = re.compile(r"\b([A-Z]{2}[A-Z0-9]{9}[0-9])\b")
+# Issuer prefix of a filing title: "PCC ROKITA S.A.: subject" (bankier),
+# "PRYMUS: subject" (stockwatch), "QUERCUS TFI S.A. (14/2026) subject" (PAP).
+_ISSUER_PREFIX_RE = re.compile(r"^([^:(]{2,60}?)\s*[:(]")
+# Trailing legal-form suffixes stripped from issuer names before matching.
+_LEGAL_SUFFIX_RE = re.compile(r"\b(S\.?\s?A\.?|ASI|SP\.?\s*Z\s*O\.?\s*O\.?)\s*$",
+                              re.IGNORECASE)
 # Report number like "12/2024" optionally prefixed by ESPI/EBI/raport.
 _REPORT_RE = re.compile(r"\b(\d{1,4}\s*/\s*\d{4})\b")
 _ESPI_RE = re.compile(r"\bESPI\b", re.IGNORECASE)
@@ -80,8 +86,17 @@ class CycleStats:
 # --- network seams (injectable in tests) -------------------------------------
 
 def default_fetch_feed(url: str, *, user_agent: str, timeout: float) -> str:
-    """Fetch raw RSS/Atom text. Network call (not used in tests)."""
-    resp = requests.get(url, headers={"User-Agent": user_agent}, timeout=timeout)
+    """Fetch raw RSS/Atom text. Network call (not used in tests).
+
+    Sends browser-like Accept headers: some sources (gpw.pl, newconnect.pl)
+    sit behind a WAF that resets bare-bones clients.
+    """
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+        "Accept-Language": "pl,en;q=0.8",
+    }
+    resp = requests.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
     return resp.text
 
@@ -136,6 +151,27 @@ def extract_report_number(*texts: str | None) -> str | None:
     return None
 
 
+def extract_issuer(title: str | None) -> str | None:
+    """Extract the issuer name from a filing title's prefix. Deterministic.
+
+    Returns the text before the first ':' or '(' with trailing legal-form
+    suffixes (S.A., SA, ASI, sp. z o.o.) stripped, or None when the title has
+    no such prefix (plain news headlines) — never guesses.
+    """
+    if not title:
+        return None
+    m = _ISSUER_PREFIX_RE.match(title.strip())
+    if not m:
+        return None
+    issuer = m.group(1).strip()
+    while True:
+        stripped = _LEGAL_SUFFIX_RE.sub("", issuer).strip(" ,.-")
+        if stripped == issuer:
+            break
+        issuer = stripped
+    return issuer or None
+
+
 def detect_type(default_type: str | None, *texts: str | None) -> str | None:
     """Detect ESPI vs EBI from item text; fall back to the feed's default."""
     blob = " ".join(t for t in texts if t)
@@ -146,7 +182,7 @@ def detect_type(default_type: str | None, *texts: str | None) -> str | None:
     return default_type
 
 
-def parse_datetime(raw: str) -> datetime:
+def parse_datetime(raw: str, tz_override: ZoneInfo | None = None) -> datetime:
     """Parse a feed pubDate string into a tz-AWARE datetime, normalized to Warsaw.
 
     Handles, authoritatively (we do NOT trust feedparser's struct_time, which
@@ -157,31 +193,39 @@ def parse_datetime(raw: str) -> datetime:
       - RFC-822 with NO offset:       "Mon, 06 May 2024 09:00:00"  -> Warsaw
       - ISO-8601 with offset:         "2024-01-02T09:15:00+01:00"
       - ISO-8601 naive:               "2024-05-06T09:00:00"        -> Warsaw
+      - naive "YYYY-MM-DD HH:MM":     "2026-07-02 07:54" (stockwatch) -> Warsaw
 
     A naive timestamp (no offset/zone) is interpreted as Europe/Warsaw local
     time, which is the convention of the Polish sources. Never UTC-by-default.
+
+    `tz_override`: some sources (bankier.pl, gpw.pl) label Warsaw wall-clock
+    time with a fixed "+0100" offset year-round — the offset is decoration and
+    wrong in summer (CEST is +0200). When a feed sets `timezone_override`, the
+    stated offset is DISCARDED and the wall-clock is interpreted in that zone.
+    This is correct year-round: in winter Warsaw IS +0100, so both readings
+    agree; in summer only the override reading matches the true instant.
     """
     s = raw.strip()
 
+    dt: datetime | None = None
     # ISO-8601 first (RFC parser would reject it).
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return _as_warsaw(dt)
     except ValueError:
-        pass
+        # Named-abbreviation zones the RFC parser can't resolve (CET/CEST) or
+        # maps to a naive datetime (GMT handled by parser, but be explicit).
+        m = _TRAILING_ABBREV_RE.search(s)
+        if m:
+            tz = _TZ_ABBREV[m.group(1).upper()]
+            base = s[: m.start()].strip()
+            dt = parsedate_to_datetime(base)  # naive (offset stripped with the name)
+            dt = dt.replace(tzinfo=tz)
+        else:
+            # RFC-822 with a numeric offset, or no offset at all.
+            dt = parsedate_to_datetime(s)  # raises ValueError/TypeError on garbage
 
-    # Named-abbreviation zones the RFC parser can't resolve (CET/CEST) or maps
-    # to a naive datetime (GMT handled by parser, but be explicit/robust).
-    m = _TRAILING_ABBREV_RE.search(s)
-    if m:
-        tz = _TZ_ABBREV[m.group(1).upper()]
-        base = s[: m.start()].strip()
-        dt = parsedate_to_datetime(base)  # naive (offset stripped with the name)
-        dt = dt.replace(tzinfo=tz)
-        return _as_warsaw(dt)
-
-    # RFC-822 with a numeric offset, or no offset at all.
-    dt = parsedate_to_datetime(s)  # raises ValueError/TypeError on garbage
+    if tz_override is not None:
+        dt = dt.replace(tzinfo=tz_override)
     return _as_warsaw(dt)
 
 
@@ -192,7 +236,7 @@ def _as_warsaw(dt: datetime) -> datetime:
     return dt.astimezone(WARSAW)
 
 
-def parse_published_at(entry) -> str:
+def parse_published_at(entry, tz_override: ZoneInfo | None = None) -> str:
     """Return a tz-aware ISO timestamp (Warsaw) for the item's publication moment.
 
     Parsed from the raw feed pubDate/updated string (the point-in-time anchor),
@@ -201,7 +245,7 @@ def parse_published_at(entry) -> str:
     raw = getattr(entry, "published", None) or getattr(entry, "updated", None)
     if raw:
         try:
-            return parse_datetime(raw).isoformat()
+            return parse_datetime(raw, tz_override).isoformat()
         except (ValueError, TypeError):
             logger.warning("unparseable pubDate %r", raw)
     raise ValueError("entry has no parseable pubDate (cannot anchor point-in-time)")
@@ -231,6 +275,12 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
     parsed = feedparser.parse(raw_text)
     items: list[dict] = []
     default_type = feed_cfg.get("type")
+    # Per-feed wall-clock zone for sources whose stated offset is mislabeled
+    # (see parse_datetime); None -> trust the stated offset.
+    tz_override = (
+        ZoneInfo(feed_cfg["timezone_override"])
+        if feed_cfg.get("timezone_override") else None
+    )
     for entry in parsed.entries:
         title = (getattr(entry, "title", "") or "").strip()
         if not title:
@@ -238,7 +288,7 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
         summary = _entry_text(entry)
         url = getattr(entry, "link", None)
         try:
-            published_at = parse_published_at(entry)
+            published_at = parse_published_at(entry, tz_override)
         except ValueError as exc:
             logger.warning("skipping item without pubDate in %s: %s", feed_cfg["name"], exc)
             continue
@@ -250,7 +300,9 @@ def parse_feed_items(feed_cfg: dict, raw_text: str) -> list[dict]:
             "url": url,
             "published_at": published_at,
             "_instant": datetime.fromisoformat(published_at).astimezone(timezone.utc),
-            "espi_ebi_type": detect_type(default_type, title, summary),
+            # The item URL participates in type detection: stockwatch encodes
+            # ",espi," / ",ebi," in its link slug while titles carry no marker.
+            "espi_ebi_type": detect_type(default_type, title, summary, url),
             "issuer_isin": extract_isin(title, summary),
             "issuer_name": title,  # best-effort; refined later by the LLM phase
             "report_number": extract_report_number(title, summary),
@@ -385,7 +437,13 @@ def _store_items(conn, items, *, want_full_text, fetch_full_text, user_agent, ti
                 )
                 continue
 
-        instrument_id = filings_db.resolve_instrument_id(conn, it["issuer_isin"])
+        # ISIN first (authoritative); the live feeds carry none, so fall back
+        # to the deterministic issuer-name/ticker match from the title prefix.
+        issuer = extract_issuer(it["title"])
+        instrument_id = (
+            filings_db.resolve_instrument_id(conn, it["issuer_isin"])
+            or filings_db.resolve_instrument_id_by_name(conn, issuer)
+        )
         full_text = ""
         if want_full_text and it.get("url"):
             full_text = fetch_full_text(it["url"], user_agent=user_agent, timeout=timeout)
@@ -393,7 +451,7 @@ def _store_items(conn, items, *, want_full_text, fetch_full_text, user_agent, ti
         inserted = filings_db.insert_filing(conn, {
             "source": it["source"],
             "issuer_isin": it["issuer_isin"],
-            "issuer_name": it["issuer_name"],
+            "issuer_name": issuer or it["issuer_name"],
             "instrument_id": instrument_id,
             "espi_ebi_type": it["espi_ebi_type"],
             "report_number": it["report_number"],

@@ -118,6 +118,31 @@ def resolve_instrument_id(conn: sqlite3.Connection, issuer_isin: str | None) -> 
     return int(row[0]) if row else None
 
 
+def resolve_instrument_id_by_name(conn: sqlite3.Connection,
+                                  issuer: str | None) -> int | None:
+    """Map an issuer name (from a filing title prefix) to instruments(id).
+
+    Fallback for feeds that carry no ISIN (bankier/stockwatch/PAP RSS).
+    Deterministic and conservative: case-insensitive EXACT match on ticker or
+    name only, and None on ambiguity (two different instruments matching) —
+    never a fuzzy guess.
+    """
+    if not issuer:
+        return None
+    key = issuer.strip().upper()
+    if not key:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT id FROM instruments "
+            "WHERE UPPER(ticker) = ? OR UPPER(name) = ? LIMIT 2",
+            (key, key),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None  # no instruments table yet
+    return int(rows[0][0]) if len(rows) == 1 else None
+
+
 def insert_filing(conn: sqlite3.Connection, item: dict) -> bool:
     """Append a filing. Returns True if a NEW row was inserted, False if it was
     a duplicate (existing row left untouched — append-only).

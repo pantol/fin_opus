@@ -40,8 +40,8 @@ def cmd_ingest(args) -> int:
     else:  # gpw (default): official session archive + GPW Benchmark indices
         from app.ingestion import gpw_archive
 
-        today = datetime.now(ZoneInfo("Europe/Warsaw")).date()
-        end = date.fromisoformat(args.end) if args.end else today
+        end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
+            datetime.now(ZoneInfo("Europe/Warsaw")))
         if args.start:
             start = date.fromisoformat(args.start)
         else:
@@ -77,6 +77,20 @@ def cmd_ingest(args) -> int:
         return 2
     conn.close()
     return 0
+
+
+def _default_ingest_end(now_warsaw):
+    """Latest session date safe to ingest as FINAL EOD data.
+
+    GPW serves TODAY's archive file intraday with partial (still-changing)
+    bars; ingesting one as a final EOD bar breaks the point-in-time
+    convention (as_of_date = session date assumes the bar is closed). Today
+    only counts after the session is over (closing auction ends 17:05;
+    18:00 adds slack). An explicit --end overrides this guard.
+    """
+    from datetime import timedelta
+    today = now_warsaw.date()
+    return today if now_warsaw.hour >= 18 else today - timedelta(days=1)
 
 
 def cmd_features(args) -> int:

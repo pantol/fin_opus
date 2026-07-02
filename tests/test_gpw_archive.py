@@ -189,6 +189,20 @@ def test_ingest_range_delisted_absence_is_not_a_failure(conn):
     assert "unborn" not in report.failures
 
 
+def test_default_ingest_end_excludes_today_until_session_close():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from app.cli import _default_ingest_end
+
+    warsaw = ZoneInfo("Europe/Warsaw")
+    # Intraday (09:30): today's archive file holds PARTIAL bars -> yesterday.
+    morning = datetime(2026, 7, 2, 9, 30, tzinfo=warsaw)
+    assert _default_ingest_end(morning) == date(2026, 7, 1)
+    # After the close (18:05): today's bar is final -> today.
+    evening = datetime(2026, 7, 2, 18, 5, tzinfo=warsaw)
+    assert _default_ingest_end(evening) == date(2026, 7, 2)
+
+
 def test_ingest_range_is_idempotent(conn):
     for _ in range(2):
         gpw.ingest_range(

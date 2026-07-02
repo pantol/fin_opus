@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterable
 
@@ -63,30 +64,55 @@ class Bar:
     volume: float
 
 
-def _looks_like_csv(text: str) -> bool:
-    head = text.lstrip()[:64].lower()
-    return not head.startswith(("<!doctype", "<html"))
+# Plain-text bodies Stooq serves instead of CSV when it refuses a request.
+_BLOCK_MARKERS = (
+    "access denied",
+    "przekroczona dzienna liczba",    # daily call limit (PL)
+    "exceeded the daily hits limit",  # daily call limit (EN)
+)
 
 
-def fetch_csv(ticker: str, timeout: float = 30.0) -> str:
+def _failure_reason(text: str) -> str | None:
+    """Return why a response body is not CSV data, or None if it looks like CSV."""
+    head = text.lstrip()[:400].lower()
+    if head.startswith(("<!doctype", "<html")) or "__verify" in head:
+        return "JS bot-check page"
+    for marker in _BLOCK_MARKERS:
+        if marker in head:
+            return f"blocked: {text.strip().splitlines()[0][:80]!r}"
+    return None
+
+
+def fetch_csv(ticker: str, timeout: float = 30.0, retries: int = 2,
+              backoff_seconds: float = 2.0) -> str:
     """Fetch raw CSV text for a ticker from Stooq. Network call (not used in tests).
 
-    Tries the .pl then .com endpoint. Raises StooqUnavailableError if Stooq
-    serves an HTML/JS bot-check page instead of CSV (common when rate-limited or
-    behind certain networks), so callers get a clear, actionable failure.
+    Tries the .pl then .com endpoint, retrying transient network errors with
+    backoff. Raises StooqUnavailableError when Stooq refuses the request
+    (JS bot-check page, "Access denied", daily call limit), so callers get a
+    clear, actionable failure instead of a parse error.
     """
     headers = {"User-Agent": "Mozilla/5.0 (compatible; gpw-decision-system)"}
-    last_text = ""
+    last_reason = "no endpoint reached"
     for template in STOOQ_URLS:
         url = template.format(ticker=ticker.lower())
-        resp = requests.get(url, timeout=timeout, headers=headers)
-        resp.raise_for_status()
-        if _looks_like_csv(resp.text):
-            return resp.text
-        last_text = resp.text
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.get(url, timeout=timeout, headers=headers)
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                last_reason = f"network error: {exc}"
+                if attempt < retries:
+                    time.sleep(backoff_seconds * (attempt + 1))
+                    continue
+                break
+            reason = _failure_reason(resp.text)
+            if reason is None:
+                return resp.text
+            last_reason = reason
+            break  # a refusal is not transient for this URL; try the other domain
     raise StooqUnavailableError(
-        f"Stooq returned a non-CSV response for '{ticker}' "
-        f"(likely a JS bot-check / rate limit). First bytes: {last_text[:80]!r}"
+        f"Stooq unavailable for '{ticker}': {last_reason}"
     )
 
 
@@ -176,31 +202,56 @@ def store_bars(conn, instrument_id: int, bars: Iterable[Bar], adjusted: bool = F
     return n
 
 
-def ingest_universe(conn, universe: dict, fetcher=fetch_csv) -> dict[str, int]:
+@dataclass
+class IngestReport:
+    """Outcome of a universe ingest: per-ticker bar counts and failures."""
+    counts: dict[str, int] = field(default_factory=dict)    # ticker -> bars stored
+    failures: dict[str, str] = field(default_factory=dict)  # ticker -> reason
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+
+def ingest_universe(conn, universe: dict, fetcher=fetch_csv,
+                    delay_seconds: float = 0.0) -> IngestReport:
     """Ingest indices + instruments described by the universe config.
 
     `fetcher` is injectable so tests can supply cached CSV without network.
-    Returns {ticker: bars_stored}.
+    One ticker failing (Stooq refusal, network error, bad CSV, empty history)
+    does not abort the rest: successes are committed per ticker (upserts are
+    idempotent, so partial ingests are safe to re-run) and failures are
+    collected in the report. `delay_seconds` sleeps between fetches to stay
+    polite to the live endpoint.
     """
-    counts: dict[str, int] = {}
+    report = IngestReport()
 
     index_entries = list(universe.get("indices", []))
     bench = universe.get("benchmark")
     if bench:
         index_entries.append(bench)
 
-    for entry in index_entries:
-        inst_id = upsert_instrument(conn, entry, is_index=True)
-        bars = parse_csv(fetcher(entry["ticker"]))
-        counts[entry["ticker"]] = store_bars(conn, inst_id, bars, adjusted=False)
+    entries = [(e, True) for e in index_entries]
+    entries += [(e, False) for e in universe.get("instruments", [])]
 
-    for entry in universe.get("instruments", []):
-        inst_id = upsert_instrument(conn, entry, is_index=False)
-        bars = parse_csv(fetcher(entry["ticker"]))
-        counts[entry["ticker"]] = store_bars(conn, inst_id, bars, adjusted=False)
+    for i, (entry, is_index) in enumerate(entries):
+        ticker = entry["ticker"]
+        inst_id = upsert_instrument(conn, entry, is_index=is_index)
+        if i and delay_seconds > 0:
+            time.sleep(delay_seconds)
+        try:
+            bars = parse_csv(fetcher(ticker))
+        except (StooqUnavailableError, requests.RequestException, ValueError) as exc:
+            report.failures[ticker] = str(exc)
+            continue
+        if not bars:
+            report.failures[ticker] = "no rows parsed (empty history?)"
+            continue
+        report.counts[ticker] = store_bars(conn, inst_id, bars, adjusted=False)
+        conn.commit()
 
     conn.commit()
-    return counts
+    return report
 
 
 def _iso(value) -> str | None:

@@ -38,8 +38,9 @@ def test_ingest_universe_with_injected_fetcher_no_network(conn):
     def fake_fetch(ticker):
         return make_stooq_csv([("2020-01-02", 10.0, 10.5, 9.8, 10.2, 1000)])
 
-    counts = stooq.ingest_universe(conn, universe, fetcher=fake_fetch)
-    assert counts["pko"] == 1
+    report = stooq.ingest_universe(conn, universe, fetcher=fake_fetch)
+    assert report.ok
+    assert report.counts["pko"] == 1
 
     # Anti-survivorship: delisted ticker stored with delisted_on.
     row = conn.execute(
@@ -50,6 +51,42 @@ def test_ingest_universe_with_injected_fetcher_no_network(conn):
     # Raw prices flagged adjusted=0.
     n_raw = conn.execute("SELECT COUNT(*) FROM prices WHERE adjusted=0").fetchone()[0]
     assert n_raw == 4  # wig20tr + wig + pko + ple
+
+
+def test_failure_reason_detects_stooq_refusals():
+    assert stooq._failure_reason("Access denied") is not None
+    assert stooq._failure_reason("Przekroczona dzienna liczba wywolan") is not None
+    assert stooq._failure_reason("Exceeded the daily hits limit") is not None
+    assert stooq._failure_reason("<!DOCTYPE html><html>bot check</html>") is not None
+    assert stooq._failure_reason(
+        "Data,Otwarcie,Najwyzszy,Najnizszy,Zamkniecie,Wolumen\n2020-01-02,10,11,9,10,500"
+    ) is None
+
+
+def test_ingest_universe_one_failure_does_not_abort_the_rest(conn):
+    universe = {
+        "benchmark": {"ticker": "wig20tr", "name": "WIG20TR", "is_index": True},
+        "instruments": [
+            {"ticker": "pko", "name": "PKO"},
+            {"ticker": "bad", "name": "Blocked"},
+            {"ticker": "emp", "name": "EmptyHistory"},
+        ],
+    }
+
+    def fake_fetch(ticker):
+        if ticker == "bad":
+            raise stooq.StooqUnavailableError("Stooq unavailable for 'bad': blocked")
+        if ticker == "emp":
+            return "Data,Otwarcie,Najwyzszy,Najnizszy,Zamkniecie,Wolumen\n"
+        return make_stooq_csv([("2020-01-02", 10.0, 10.5, 9.8, 10.2, 1000)])
+
+    report = stooq.ingest_universe(conn, universe, fetcher=fake_fetch)
+    assert not report.ok
+    assert report.counts == {"wig20tr": 1, "pko": 1}
+    assert "bad" in report.failures and "emp" in report.failures
+    # Successes were committed despite the failures.
+    n = conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0]
+    assert n == 2
 
 
 def test_store_bars_is_idempotent(conn):

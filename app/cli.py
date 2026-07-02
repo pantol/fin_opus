@@ -30,22 +30,25 @@ def cmd_ingest(args) -> int:
     universe = cfg.load_universe()
     if args.offline:
         print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
-        counts = demo.ingest_offline(conn, universe)
+        report = demo.ingest_offline(conn, universe)
     else:
         print("Ingesting from Stooq (this hits the network)...")
-        try:
-            counts = stooq.ingest_universe(conn, universe)
-        except stooq.StooqUnavailableError as exc:
-            print(f"ERROR: {exc}")
-            print("Stooq is blocking automated CSV access from this network.")
+        report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
+    total = sum(report.counts.values())
+    print(f"Ingested {total} bars across {len(report.counts)} tickers.")
+    for tk, n in sorted(report.counts.items()):
+        print(f"  {tk:10s} {n:6d} bars")
+    if report.failures:
+        print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
+        for tk, reason in sorted(report.failures.items()):
+            print(f"  {tk:10s} {reason}")
+        if not report.counts:
+            print("\nStooq is refusing automated CSV access from this network "
+                  "(bot-check / 'Access denied' / daily limit).")
             print("Retry later from a normal connection, or use: "
                   "python -m app.cli ingest --offline  (demo data only).")
-            conn.close()
-            return 2
-    total = sum(counts.values())
-    print(f"Ingested {total} bars across {len(counts)} tickers.")
-    for tk, n in sorted(counts.items()):
-        print(f"  {tk:10s} {n:6d} bars")
+        conn.close()
+        return 2
     conn.close()
     return 0
 

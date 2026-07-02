@@ -45,7 +45,7 @@ def _synthetic_csv(ticker: str, n_days: int, base: float, drift: float) -> str:
     return "\n".join(lines)
 
 
-def ingest_offline(conn, universe: dict, n_days: int = 1200) -> dict[str, int]:
+def ingest_offline(conn, universe: dict, n_days: int = 1200) -> stooq.IngestReport:
     """Populate the DB with deterministic demo data for the whole universe."""
     base_map_default = 100.0
 

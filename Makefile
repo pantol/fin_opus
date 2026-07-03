@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -66,6 +66,21 @@ collect:
 # Same collector, but run forever on the configured schedule (VPS daemon).
 collect-loop:
 	$(PYTHON) -m app.ingestion.collect_news --loop
+
+# Online DB snapshot (VACUUM INTO — never a live-file copy), push to R2 when
+# R2_* env credentials exist, apply retention (config/backup.yaml).
+backup:
+	$(PYTHON) -m app.cli backup
+
+# A backup that was never restored is not a backup: pull the latest snapshot,
+# integrity-check it, compare row counts vs the live DB. Run monthly.
+restore-test:
+	$(PYTHON) -m app.cli restore-test
+
+# One command to verify everything is alive: prices, collector heartbeat,
+# filings backlog, newest backup. Non-zero exit + Telegram alert when stale.
+status:
+	$(PYTHON) -m app.cli status
 
 clean:
 	rm -f data/*.db

@@ -19,6 +19,11 @@ dependencies = [
 dev = [
     "pytest>=7.4",
 ]
+# R2/S3 uploads for `make backup` — install on the VPS: pip install -e ".[backup]"
+# (tests inject a fake client, so boto3 is not needed for `make test`).
+backup = [
+    "boto3>=1.28",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

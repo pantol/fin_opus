@@ -1,0 +1,21 @@
+# Backup + status configuration (`make backup` / `make restore-test` / `make status`).
+# Secrets (R2 endpoint + keys) come ONLY from the environment:
+#   R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+# Without them the snapshot stays local-only (and `make backup` says so).
+
+backups_dir: data/backups
+
+r2:
+  bucket: gpw-backups     # R2 bucket name (create it in the Cloudflare dashboard)
+  prefix: gpw             # key prefix inside the bucket
+  required: false         # true on the VPS: missing creds then FAIL the backup
+                          # (and starve the healthcheck) instead of silently
+                          # degrading to local-only snapshots
+
+retention:
+  daily: 14               # keep this many newest snapshots
+  monthly: 12             # plus the earliest snapshot of each of this many months
+
+status:
+  collector_stale_minutes: 120   # alert when last successful collector cycle is older
+  backup_stale_hours: 36         # alert when the newest snapshot is older

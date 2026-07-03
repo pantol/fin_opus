@@ -350,6 +350,55 @@ def cmd_override(args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    """Snapshot the DB (VACUUM INTO), push to R2 when creds exist, prune old ones."""
+    from app import backup as bkp
+    from app.config import DEFAULT_DB_PATH
+
+    db_path = args.db or DEFAULT_DB_PATH
+    try:
+        report = bkp.run_backup(db_path, cfg.load_backup_config())
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    except RuntimeError as exc:  # boto3 missing while creds are set
+        print(f"ERROR: {exc}")
+        return 1
+    print(report.as_text())
+    return 0
+
+
+def cmd_restore_test(args) -> int:
+    """Verify the latest snapshot actually restores (integrity + row counts)."""
+    from app import backup as bkp
+    from app.config import DEFAULT_DB_PATH
+
+    try:
+        report = bkp.run_restore_test(args.db or DEFAULT_DB_PATH,
+                                      cfg.load_backup_config())
+    except RuntimeError as exc:  # partial creds / boto3 missing
+        print(f"ERROR: {exc}")
+        return 1
+    print(report.as_text())
+    return 0 if report.ok else 2
+
+
+def cmd_status(args) -> int:
+    """One-command deployment liveness check; alerts + non-zero exit when stale."""
+    from app import status as statusmod
+    from app.alerts import telegram
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = statusmod.run_status(conn, cfg.load_backup_config())
+    conn.close()
+    print(report.as_text())
+    if not report.ok:
+        telegram.send_text(report.alert_pl())
+        return 2
+    return 0
+
+
 def cmd_ab(args) -> int:
     """Run the baseline vs baseline+LLM A/B comparison on the OOS window."""
     conn = connect(args.db)
@@ -462,6 +511,12 @@ def main(argv=None) -> int:
     ov.add_argument("--reason", required=True, help="Why you deviated from the signal")
     ov.add_argument("--user", default=None,
                     help="user_id (default: backtest.yaml user_id)")
+    sub.add_parser("backup",
+                   help="Online DB snapshot (VACUUM INTO) + R2 upload + retention")
+    sub.add_parser("restore-test",
+                   help="Pull the latest snapshot and verify it restores")
+    sub.add_parser("status",
+                   help="Deployment liveness: prices, collector, filings, backups")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -480,6 +535,12 @@ def main(argv=None) -> int:
         return cmd_check_data(args)
     if args.command == "override":
         return cmd_override(args)
+    if args.command == "backup":
+        return cmd_backup(args)
+    if args.command == "restore-test":
+        return cmd_restore_test(args)
+    if args.command == "status":
+        return cmd_status(args)
     return 1
 
 

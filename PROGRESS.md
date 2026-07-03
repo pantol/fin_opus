@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 173 passing.
+ZERO LLM in the money path. **Tests:** 203 passing.
 
 ---
 
@@ -89,6 +89,29 @@ ZERO LLM in the money path. **Tests:** 173 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-03 — Pack B: infra & backup (snapshots, restore-test, healthchecks, status)
+VPS-reliability pack; 203 tests green (+21). The filings history is
+irreplaceable — this pack protects it.
+- **Backups:** `make backup` = online snapshot via `VACUUM INTO` (never a
+  live-file copy) → Cloudflare R2 upload when `R2_*` env creds exist
+  (injectable S3 seam; boto3 as optional `[backup]` extra) → retention
+  N daily + first-of-month M monthlies, applied locally AND remotely
+  (config/backup.yaml).
+- **Restore verification:** `make restore-test` pulls the latest snapshot
+  (R2 else local), runs PRAGMA integrity_check, verifies expected tables,
+  row-count sanity vs live (snapshot > live = failure). Documented as a
+  monthly routine.
+- **Healthchecks:** dead-man's-switch pings (app/alerts/healthcheck.py) after
+  each fully healthy collector cycle (`HEALTHCHECK_URL_COLLECT`) and each
+  successful backup (`HEALTHCHECK_URL_BACKUP`); silent no-op when unset,
+  never raises.
+- **Status:** `make status` = prices freshness + collector heartbeat vs
+  threshold + filings backlog + newest snapshot age; Polish Telegram alert
+  and exit 2 when stale (cron-able).
+- **Schema unification:** `init_db` now also ensures the collector-owned
+  filings schema, killing the `no such table: filings` trap for `make llm`
+  on a DB where the collector never ran.
 
 ### 2026-07-03 — Pack A: core hardening (next-open enforcement, membership, corporate actions, check-data, overrides)
 Hardening pack over the deterministic core; 173 tests green (+27). No new

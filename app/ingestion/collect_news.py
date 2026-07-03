@@ -19,6 +19,7 @@ import logging
 import sys
 
 from app import config as cfg
+from app.alerts import healthcheck
 from app.db import connect
 from app.ingestion import filings_db, news_collector
 
@@ -58,6 +59,10 @@ def run_once(config: dict | None = None) -> int:
                 stats.feeds_failed, stats.feeds_skipped,
             )
             return 2
+        # Dead-man's switch: only a fully healthy cycle pings, so a silent
+        # collector (crash-looping, network-dead, misconfigured) stops pinging
+        # and the healthcheck service raises the alarm.
+        healthcheck.ping("HEALTHCHECK_URL_COLLECT")
         return 0
     finally:
         conn.close()

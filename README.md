@@ -129,6 +129,27 @@ Reads only pre-materialized `llm_features` (no LLM call), runs both strategies
 through the identical engine/costs, and reports per-metric deltas with a gate
 verdict (Sharpe strictly better AND Sortino/maxDD not worse).
 
+### 7. Backups + deployment status
+
+```bash
+make backup                     # VACUUM INTO snapshot -> R2 (if creds) -> retention
+make restore-test               # pull the latest snapshot and PROVE it restores
+make status                     # prices/collector/filings/backup liveness; alerts when stale
+```
+
+Snapshots are taken with SQLite's online `VACUUM INTO` — never by copying the
+live file. With `R2_ENDPOINT_URL` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`
+in the environment the snapshot is pushed to Cloudflare R2 (bucket/prefix and
+retention in `config/backup.yaml`: N newest daily + the first snapshot of each
+of M months); without credentials it stays local-only and says so. R2 uploads
+need the optional extra: `pip install -e ".[backup]"`.
+
+**A backup that was never restored is not a backup** — run `make restore-test`
+monthly: it pulls the latest snapshot (R2 when configured, else local), runs
+`PRAGMA integrity_check`, verifies the expected tables, and compares row counts
+against the live DB. The `filings` history is irreplaceable (RSS has no
+backfill); this is what protects it.
+
 ### A typical day, end to end
 
 ```bash
@@ -174,8 +195,12 @@ app/
     synthesis.py        # judge (research + quant context -> verdict -> llm_score)
     pipeline.py         # materializes point-in-time llm_features rows
   logging/decisions.py  # persist decisions + feature snapshots + trades + equity
-  alerts/telegram.py    # alert stub (dry-run prints a Polish card if no token)
-  cli.py                # ingest / features / backtest / ab / llm entrypoints
+  alerts/
+    telegram.py         # alert stub (dry-run prints a Polish card if no token)
+    healthcheck.py      # dead-man's-switch pings (healthchecks.io-style)
+  backup.py             # VACUUM INTO snapshots, R2 upload, retention, restore test
+  status.py             # one-command deployment liveness (make status)
+  cli.py                # ingest / features / backtest / ab / llm / backup / status ...
 config/
   universe.yaml         # WIG20 members + indices + delisted tickers (ISIN-keyed)
   backtest.yaml         # costs, walk-forward windows, capital, seed, universe gate
@@ -305,9 +330,64 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
-**Verify it is running** (health beacon + recent rows):
+**Backups + status on a timer** (protects the irreplaceable filings history):
+
+```ini
+# /etc/systemd/system/gpw-backup.service
+[Unit]
+Description=GPW DB backup (snapshot -> R2 -> retention)
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fin_opus
+EnvironmentFile=/opt/fin_opus/.env
+ExecStart=/opt/fin_opus/.venv/bin/python -m app.cli backup
+
+# /etc/systemd/system/gpw-backup.timer
+[Unit]
+Description=Nightly GPW DB backup
+[Timer]
+OnCalendar=*-*-* 02:30
+Persistent=true
+[Install]
+WantedBy=timers.target
+
+# /etc/systemd/system/gpw-status.service
+[Unit]
+Description=GPW deployment status check (alerts when stale)
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/fin_opus
+EnvironmentFile=/opt/fin_opus/.env
+ExecStart=/opt/fin_opus/.venv/bin/python -m app.cli status
+
+# /etc/systemd/system/gpw-status.timer
+[Unit]
+Description=Hourly GPW status check
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
+```
+
+Enable with `systemctl enable --now gpw-backup.timer gpw-status.timer`.
+**Monthly routine:** run `make restore-test` (or add a third timer) — a backup
+that was never restored is not a backup.
+
+**Environment variables** (all optional; features degrade gracefully):
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `OPENROUTER_API_KEY` | `make llm` | LLM feature materialization |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | alerts | live alerts (dry-run prints without them) |
+| `R2_ENDPOINT_URL` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | `make backup` | snapshot upload to Cloudflare R2 |
+| `HEALTHCHECK_URL_COLLECT` | collector | pinged after each fully healthy cycle |
+| `HEALTHCHECK_URL_BACKUP` | `make backup` | pinged after each successful backup |
+
+**Verify it is running** (`make status` wraps all of this + alerting):
 
 ```bash
+make status
 sqlite3 data/gpw.db "SELECT last_successful_run, last_cycle_new_items, last_error FROM collector_health;"
 sqlite3 data/gpw.db "SELECT source, published_at, title FROM filings ORDER BY published_at DESC LIMIT 5;"
 ```

@@ -212,12 +212,17 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     Column migrations run BEFORE indexes that depend on added columns, so a
     pre-existing database (e.g. an `instruments` table without `isin`) upgrades
-    cleanly.
+    cleanly. Also ensures the collector-owned schema (filings/collector_health)
+    so every CLI command sees ONE complete database — the collector keeps its
+    own standalone ensure_schema path for VPS-only deployments.
     """
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_instruments_isin ON instruments(isin)")
     conn.commit()
+    from app.ingestion import filings_db  # local import: keep app.db import-light
+
+    filings_db.ensure_schema(conn)
 
 
 def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:

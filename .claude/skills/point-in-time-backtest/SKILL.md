@@ -25,6 +25,15 @@ Apply whenever code touches market data, features, signals, sizing, or simulated
 - Buy at ask, sell at bid (model the spread).
 - Apply commission per the broker's real schedule and slippage scaled to liquidity.
 - Reject fills larger than realistically available volume — GPW small caps are illiquid.
+- **Next-open timing**: signals decide on day T's close (EOD data), execution simulates the OPEN of T+lag with lag >= 1 — never the signal bar. A fill lag < 1 must raise. Fill-bar anomalies (missing open, missing bar) are recorded, never silent.
+
+## 4b. Point-in-time universe (index membership)
+- When the strategy universe is an index, membership for date T comes from the `index_membership` table AS OF T (revision dates from GPW announcements), never today's composition. Former members keep their historical ranges.
+- Membership gates NEW entries only; exits on held positions always evaluate.
+
+## 4c. Corporate actions
+- Splits/dividends/rights issues live in `corporate_actions` keyed by ex-date. A price gap explained by an action is NOT a market move: re-base held positions, stops, and in-flight orders on the ex-date instead of letting the ATR stop fire.
+- The adjusted price series is DERIVED from raw bars + actions and stored separately (`adjusted=1`); raw and adjusted are never mixed in one series.
 
 ## 5. Walk-forward out-of-sample only
 - Optimize on an in-sample window, evaluate on the next out-of-sample window, then roll forward.
@@ -37,5 +46,8 @@ Apply whenever code touches market data, features, signals, sizing, or simulated
 - [ ] Does the universe include delisted tickers? If no -> fix.
 - [ ] Any LLM call in the sizing/risk/execution path? If yes -> remove.
 - [ ] Do fills account for spread + commission + slippage + volume cap?
+- [ ] Could any fill derive from the signal bar (lag < 1, same-bar reference)? If yes -> fix.
+- [ ] Could a corporate-action gap fire a stop or distort accounting as if it were a market move?
+- [ ] If the universe is an index: is membership resolved as of T, not today?
 - [ ] Are reported metrics out-of-sample, vs WIG20TR?
 - [ ] Is there a unit test asserting no look-ahead?

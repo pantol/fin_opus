@@ -80,17 +80,25 @@ def run_ab(
     bt_cfg: dict,
     *,
     benchmark_ticker: str | None = None,
+    membership: dict[int, list[tuple]] | None = None,
 ) -> ABReport:
-    """Run baseline vs baseline+LLM walk-forward OOS and build a comparison report."""
+    """Run baseline vs baseline+LLM walk-forward OOS and build a comparison report.
+
+    `membership` must match what `make backtest` uses (same point-in-time
+    universe gate), otherwise the A/B verdict describes a different universe
+    than the production backtest.
+    """
     bench_ticker = benchmark_ticker or universe["benchmark"]["ticker"]
     instruments, bench_close = engine.load_instruments(conn, universe, bench_ticker)
 
     base_res = engine.run_walk_forward(
-        instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg
+        instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,
+        membership=membership,
     )
     llm_instruments = engine.attach_llm_scores(conn, instruments)
     llm_res = engine.run_walk_forward(
-        llm_instruments, bench_close, copy.deepcopy(llm_cfg), bt_cfg
+        llm_instruments, bench_close, copy.deepcopy(llm_cfg), bt_cfg,
+        membership=membership,
     )
 
     improved, deltas = _evaluate_gate(base_res.metrics, llm_res.metrics)

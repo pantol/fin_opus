@@ -99,6 +99,42 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     PRIMARY KEY (user_id, date)
 );
 
+-- Point-in-time index membership (e.g. WIG20 revisions). The backtest universe
+-- for date T = members as of T — former members stay so history is unbiased.
+CREATE TABLE IF NOT EXISTS index_membership (
+    index_name    TEXT NOT NULL,
+    instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+    date_from     TEXT NOT NULL,   -- first session of membership (ISO)
+    date_to       TEXT,            -- last session of membership (ISO), NULL = current member
+    source        TEXT,
+    PRIMARY KEY (index_name, instrument_id, date_from)
+);
+CREATE INDEX IF NOT EXISTS idx_index_membership ON index_membership(index_name, date_from);
+
+-- Corporate actions keyed by ex-date. Used to (a) derive the adjusted price
+-- series and (b) shield stops: a gap explained by an action is not a market move.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    instrument_id  INTEGER NOT NULL REFERENCES instruments(id),
+    action_type    TEXT NOT NULL CHECK (action_type IN ('dividend', 'split', 'rights_issue')),
+    ex_date        TEXT NOT NULL,   -- first session the price trades ex (ISO)
+    value_or_ratio REAL NOT NULL,   -- dividend: PLN/share; split: new shares per old; rights_issue: price factor
+    source         TEXT,
+    PRIMARY KEY (instrument_id, action_type, ex_date)
+);
+CREATE INDEX IF NOT EXISTS idx_corporate_actions_ex ON corporate_actions(instrument_id, ex_date);
+
+-- Append-only journal of manual deviations from system signals. Rows are only
+-- ever inserted (no UPDATE/DELETE path exists in code).
+CREATE TABLE IF NOT EXISTS overrides (
+    id           INTEGER PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    timestamp    TEXT NOT NULL,     -- ISO datetime, UTC
+    decision_id  INTEGER REFERENCES decisions(id),
+    action_taken TEXT NOT NULL,
+    reason       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_overrides_user ON overrides(user_id, timestamp);
+
 -- ---------------------------------------------------------------------------
 -- Phase 2: LLM FEATURES layer. The LLM is ALWAYS only an INPUT to the
 -- deterministic risk layer (CLAUDE.md rule 1). Nothing here computes money.

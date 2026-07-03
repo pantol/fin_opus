@@ -35,20 +35,30 @@ def _format_card(decision: dict) -> str:
     return "\n".join(lines)
 
 
-def send_alert(decision: dict, *, token: str | None = None, chat_id: str | None = None) -> dict:
-    """Send (or dry-run) an alert. Returns a small status dict."""
+def send_text(text: str, *, token: str | None = None, chat_id: str | None = None) -> dict:
+    """Send (or dry-run) a plain-text alert. Returns a small status dict.
+
+    Dry-run contract: with no token/chat_id the card is printed to stdout and
+    {"mode": "dry-run", "sent": False, "card": ...} is returned — callers
+    (data-quality, staleness, backup, LLM budget alerts) rely on this never
+    raising in an unconfigured environment.
+    """
     token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
-    card = _format_card(decision)
 
     if not token or not chat_id:
-        print("[telegram dry-run]\n" + card)
-        return {"mode": "dry-run", "sent": False, "card": card}
+        print("[telegram dry-run]\n" + text)
+        return {"mode": "dry-run", "sent": False, "card": text}
 
     resp = requests.post(
         _API.format(token=token),
-        data={"chat_id": chat_id, "text": card},
+        data={"chat_id": chat_id, "text": text},
         timeout=15,
     )
     resp.raise_for_status()
-    return {"mode": "live", "sent": True, "card": card}
+    return {"mode": "live", "sent": True, "card": text}
+
+
+def send_alert(decision: dict, *, token: str | None = None, chat_id: str | None = None) -> dict:
+    """Send (or dry-run) a decision alert card."""
+    return send_text(_format_card(decision), token=token, chat_id=chat_id)

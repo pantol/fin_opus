@@ -5,8 +5,9 @@
 
 **Current phase:** Phase 2 (LLM FEATURES layer) — **plumbing COMPLETE & green;
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
-standalone ESPI/EBI collector remain complete. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 121 passing.
+standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
+C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
+ZERO LLM in the money path. **Tests:** 173 passing.
 
 ---
 
@@ -69,6 +70,10 @@ ZERO LLM in the money path. **Tests:** 121 passing.
 
 ## Invariants (enforced by tests)
 
+- [x] Next-open fills enforced: lag >= 1 or raise; no fill from the signal bar; fill anomalies audited (`tests/test_fill_timing.py`)
+- [x] Point-in-time index membership: no trading before `date_from` (`tests/test_index_membership.py`)
+- [x] Corporate-action gaps shield the ATR stop instead of firing it; unexplained gaps still fire (`tests/test_corporate_actions.py`)
+- [x] Data-quality monitor: missing sessions, bad volume, unexplained jumps, stale tickers (`tests/test_data_quality.py`)
 - [x] Point-in-time / no look-ahead (`tests/test_point_in_time.py`)
 - [x] Anti-survivorship: delisted tickers traded only in `[listed_from, delisted_on]` (`tests/test_integration.py`)
 - [x] Deterministic money logic, reproducible with pinned seed (`tests/test_risk.py`, `tests/test_integration.py`)
@@ -84,6 +89,35 @@ ZERO LLM in the money path. **Tests:** 121 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-03 — Pack A: core hardening (next-open enforcement, membership, corporate actions, check-data, overrides)
+Hardening pack over the deterministic core; 173 tests green (+27). No new
+features, no LLM. Note: this entry also reconciles the stale counts above —
+between 2026-06-22 and this entry the repo gained real GPW-archive ingestion,
+verified ESPI/EBI feeds, LLM CLI wiring, and a README rewrite (commits
+`2b4d345`..`62f0a51`, 121 → 146 tests) that were not logged here.
+- **A.1 next-open fills:** already implemented (decide T close, fill T+1 open) —
+  now ENFORCED: `signal_to_fill_lag_days < 1` raises; lapsed orders and
+  close-fallback fills are recorded in `BacktestResult.fill_anomalies` (printed
+  by the CLI) instead of passing silently. Fixed a latent bug: a NULL open/close
+  on the fill bar produced a NaN reference price instead of falling back/lapsing.
+- **A.2 index membership:** `index_membership` table + `config/index_membership.yaml`
+  fixture (placeholder dates) + `make refdata` loader. Opt-in via
+  `universe.index` in backtest.yaml: entries gated on membership AS OF T;
+  exits on held positions always evaluate.
+- **A.3 corporate actions:** `corporate_actions` table + fixture + loader; on
+  ex-date the engine re-bases held positions (split: qty×r, entry/stop ÷r;
+  dividend: cash credit + stop −D; rights: stop ×factor) and in-flight orders,
+  so action gaps never fire the ATR stop as market moves — unexplained gaps
+  still do. Deterministic back-adjusted series derived into `adjusted=1` rows;
+  backtest stays on raw prices (separate decision).
+- **A.4 check-data + overrides:** `make check-data` (missing sessions vs the
+  benchmark-derived exchange calendar, volume<=0, jumps>threshold without a
+  matching action, stale tickers) + Polish Telegram alert via new generic
+  `send_text` (dry-run contract preserved). First real-data run immediately
+  flagged split-shaped −90% gaps on PZU (2015-11-30) and DNP (2025-07-31) —
+  fill `config/corporate_actions.yaml` accordingly. Append-only `overrides`
+  journal + `python -m app.cli override`.
 
 ### 2026-06-22 — Phase 2 review fixes (PIT tz, persist-then-mark, CLI gate, provider audit)
 Code-review hardening of the Phase-2 LLM features layer. 121 tests green

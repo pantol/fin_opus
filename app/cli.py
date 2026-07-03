@@ -143,9 +143,21 @@ def cmd_backtest(args) -> int:
         print(f"Strategy uses llm_score; attached LLM features for "
               f"{with_scores}/{len(instruments)} instruments.")
 
+    membership, membership_error = _load_membership(conn, bt_cfg)
+    if membership_error:
+        print(membership_error)
+        conn.close()
+        return 1
+
     print(f"Running walk-forward backtest on {len(instruments)} instruments "
           f"(strategy: {strat['name']} v{strat['version']})...")
-    result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg)
+    result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg,
+                                     membership=membership)
+    if result.fill_anomalies:
+        n_lapsed = sum(1 for a in result.fill_anomalies
+                       if a["type"] == "order_lapsed_no_bar")
+        print(f"Fill audit: {len(result.fill_anomalies) - n_lapsed} orders used a "
+              f"close reference (open missing), {n_lapsed} lapsed (fill bar missing).")
 
     _persist_results(conn, bt_cfg["user_id"], result, strategy_id=strategy_id,
                      params=strat)
@@ -249,6 +261,95 @@ def _print_llm_audit(conn, limit: int = 10) -> None:
               f"cached_tokens={r['cached_tokens']}")
 
 
+def _load_membership(conn, bt_cfg):
+    """Resolve the optional point-in-time universe gate (universe.index).
+
+    Returns (membership_map | None, error_message | None). Used by BOTH
+    backtest and ab so the two always simulate the same universe.
+    """
+    index_name = (bt_cfg.get("universe") or {}).get("index")
+    if not index_name:
+        return None, None
+    membership = engine.load_membership_map(conn, index_name)
+    if not membership:
+        return None, (
+            f"ERROR: universe.index='{index_name}' is set but the "
+            f"index_membership table is empty. Run `python -m app.cli refdata` "
+            f"(and fill config/index_membership.yaml) first."
+        )
+    print(f"Point-in-time universe: '{index_name}' membership loaded for "
+          f"{len(membership)} instruments.")
+    return membership, None
+
+
+def cmd_refdata(args) -> int:
+    """Load index membership + corporate action fixtures; derive adjusted prices."""
+    from app.ingestion import refdata
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = refdata.load_refdata(
+        conn, cfg.load_index_membership(), cfg.load_corporate_actions()
+    )
+    print(f"Loaded {report.membership_rows} index membership rows and "
+          f"{report.action_rows} corporate actions.")
+    if report.adjusted_instruments:
+        print(f"Derived adjusted price series for {report.adjusted_instruments} "
+              f"instruments ({report.adjusted_bars} bars, adjusted=1; raw rows untouched).")
+    if report.failures:
+        print(f"\n{len(report.failures)} problem(s):")
+        for failure in report.failures:
+            print(f"  {failure}")
+        conn.close()
+        return 2
+    conn.close()
+    return 0
+
+
+def cmd_check_data(args) -> int:
+    """Data-quality report; sends a Telegram alert (dry-run without token) on issues."""
+    from app.alerts import telegram
+    from app.ingestion import quality
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = quality.run_checks(conn, cfg.load_universe(), cfg.load_data_quality())
+    print(quality.format_report(report))
+    conn.close()
+    if not report.ok:
+        telegram.send_text(quality.format_alert_pl(report))
+        return 2
+    return 0
+
+
+def cmd_override(args) -> int:
+    """Journal a manual deviation from a system signal (append-only)."""
+    from datetime import datetime, timezone
+
+    conn = connect(args.db)
+    init_db(conn)
+    user_id = args.user or cfg.load_backtest_config()["user_id"]
+    if args.decision_id is not None:
+        row = conn.execute(
+            "SELECT id FROM decisions WHERE id = ?", (args.decision_id,)
+        ).fetchone()
+        if row is None:
+            print(f"ERROR: decision {args.decision_id} does not exist.")
+            conn.close()
+            return 1
+    conn.execute(
+        "INSERT INTO overrides (user_id, timestamp, decision_id, action_taken, reason)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (user_id, datetime.now(timezone.utc).isoformat(), args.decision_id,
+         args.action, args.reason),
+    )
+    conn.commit()
+    ref = f" (decision {args.decision_id})" if args.decision_id is not None else ""
+    print(f"Override recorded for user '{user_id}'{ref}.")
+    conn.close()
+    return 0
+
+
 def cmd_ab(args) -> int:
     """Run the baseline vs baseline+LLM A/B comparison on the OOS window."""
     conn = connect(args.db)
@@ -263,9 +364,16 @@ def cmd_ab(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
+    membership, membership_error = _load_membership(conn, bt_cfg)
+    if membership_error:
+        print(membership_error)
+        conn.close()
+        return 1
+
     print(f"A/B: baseline='{baseline['name']}' vs llm='{llm['name']}' "
           f"on {len(instruments)} instruments (OOS, realistic costs)...")
-    report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg)
+    report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg,
+                               membership=membership)
     print()
     print(report.as_text())
     conn.close()
@@ -342,6 +450,18 @@ def main(argv=None) -> int:
                      help="Decision date T (ISO; default: today in Europe/Warsaw)")
     llm.add_argument("--ticker", default=None,
                      help="Restrict to one ticker (default: all universe instruments)")
+    sub.add_parser("refdata",
+                   help="Load index membership + corporate actions fixtures; derive adjusted prices")
+    sub.add_parser("check-data",
+                   help="Data-quality report (missing sessions, volume, jumps, stale tickers)")
+    ov = sub.add_parser("override",
+                        help="Journal a manual deviation from a system signal (append-only)")
+    ov.add_argument("--decision-id", type=int, default=None,
+                    help="The decisions.id being overridden (optional)")
+    ov.add_argument("--action", required=True, help="What you actually did")
+    ov.add_argument("--reason", required=True, help="Why you deviated from the signal")
+    ov.add_argument("--user", default=None,
+                    help="user_id (default: backtest.yaml user_id)")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -354,6 +474,12 @@ def main(argv=None) -> int:
         return cmd_ab(args)
     if args.command == "llm":
         return cmd_llm(args)
+    if args.command == "refdata":
+        return cmd_refdata(args)
+    if args.command == "check-data":
+        return cmd_check_data(args)
+    if args.command == "override":
+        return cmd_override(args)
     return 1
 
 

@@ -33,5 +33,17 @@ def load_news_sources() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "news_sources.yaml")
 
 
+def load_index_membership() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "index_membership.yaml")
+
+
+def load_corporate_actions() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "corporate_actions.yaml")
+
+
+def load_data_quality() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "data_quality.yaml")
+
+
 def load_llm_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "llm.yaml")

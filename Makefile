@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -26,6 +26,16 @@ backfill:
 
 features:
 	$(PYTHON) -m app.cli features
+
+# Load index membership + corporate action fixtures (config/*.yaml) and derive
+# the adjusted price series for instruments that have actions.
+refdata:
+	$(PYTHON) -m app.cli refdata
+
+# Data-quality report: missing sessions, zero/negative volume, unexplained
+# price jumps, stale tickers. Telegram alert on issues (dry-run without token).
+check-data:
+	$(PYTHON) -m app.cli check-data
 
 # Full chain: ingest (live Stooq) -> features -> walk-forward backtest -> metrics.
 backtest: ingest

@@ -1,0 +1,12 @@
+# Data-quality monitor thresholds (`make check-data`).
+
+# Flag |close/prev_close - 1| above this fraction when no corporate action
+# explains the gap on that ex-date.
+max_jump_pct: 0.25
+
+# Flag an instrument as stale when it is still alive (not delisted) but its
+# last bar is more than this many exchange sessions behind the calendar.
+stale_sessions: 5
+
+# How many example rows to print per issue category in the report.
+max_examples: 10

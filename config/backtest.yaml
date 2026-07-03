@@ -16,5 +16,12 @@ walk_forward:
   out_sample_months: 6
   benchmark: wig20tr            # never SPY
 
+# Optional point-in-time universe gate. When `index` names an index (e.g.
+# wig20), NEW entries are only evaluated for instruments that are members as
+# of T per the index_membership table (`python -m app.cli refdata` loads it).
+# null = trade the full universe.yaml list (default; membership not consulted).
+universe:
+  index: null
+
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)

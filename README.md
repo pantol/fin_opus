@@ -24,7 +24,7 @@ make setup                      # create .venv and install dependencies
 cp .env.example .env            # then fill in the secrets you need:
                                 #   OPENROUTER_API_KEY  - only for `make llm`
                                 #   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID - optional alerts
-make test                       # 146 tests: money math, point-in-time, fills, LLM contracts
+make test                       # 173 tests: money math, point-in-time, fills, LLM contracts
 ```
 
 Environment variables are read from the shell environment — export them or use
@@ -52,6 +52,33 @@ python -m app.cli ingest --start 2020-01-01 --end 2020-12-31   # explicit range
 python -m app.cli ingest --source stooq                        # legacy path (login-gated by Stooq)
 make ingest-offline                                            # deterministic DEMO data (NOT real prices)
 ```
+
+### 2b. Reference data + data quality
+
+```bash
+make refdata                    # load index membership + corporate actions fixtures,
+                                # derive the adjusted price series (adjusted=1 rows)
+make check-data                 # data-quality report; non-zero exit + Telegram alert on issues
+python -m app.cli override --decision-id 42 --action "skipped ENTER" --reason "earnings tomorrow"
+```
+
+- `config/index_membership.yaml` — **point-in-time index membership** (WIG20
+  revisions). When `universe.index` is set in `config/backtest.yaml`, the
+  backtest only evaluates NEW entries for instruments that were members **as of
+  each simulated day** (former members keep their historical ranges). Ships
+  with placeholder dates — fill the real revision dates from GPW announcements.
+- `config/corporate_actions.yaml` — dividends/splits/rights issues by ex-date.
+  Loaded actions (a) derive a back-adjusted `adjusted=1` price series and
+  (b) shield the ATR stop in the backtest: a gap explained by an action is
+  re-based, never treated as a market crash.
+- `make check-data` scans for missing sessions vs the exchange calendar,
+  zero/negative volume, close-to-close jumps above `config/data_quality.yaml`'s
+  threshold with **no matching corporate action**, and stale (alive but silent)
+  tickers. Run it after every ingest; it exits non-zero when something needs
+  attention, so it is cron-friendly.
+- `override` appends to an **append-only journal** (`overrides` table) — log
+  every manual deviation from a system signal so future-you can audit the
+  damage honestly.
 
 ### 3. Inspect features and run the backtest
 
@@ -110,6 +137,7 @@ make collect-loop &
 
 # after the session close (>= 18:00 Europe/Warsaw):
 make ingest        # top up EOD bars
+make check-data    # sanity-check the fresh data (alerts on issues)
 make llm           # turn today's filings into llm_score features (optional)
 make backtest      # walk-forward metrics vs WIG20TR
 make ab            # optional: baseline vs +LLM comparison
@@ -125,6 +153,8 @@ app/
     gpw_archive.py      # PRIMARY: GPW official session archive + GPW Benchmark indices
     stooq.py            # legacy Stooq CSV path (login-gated by Stooq as of 2026)
     demo.py             # deterministic offline demo data (NOT real prices)
+    refdata.py          # index membership + corporate actions + adjusted-series deriver
+    quality.py          # data-quality monitor (make check-data)
     news_collector.py   # ESPI/EBI + news RSS collector (point-in-time, ZERO LLM)
     filings_db.py       # filings table, dedup, health beacon, issuer resolution
   features/
@@ -148,11 +178,14 @@ app/
   cli.py                # ingest / features / backtest / ab / llm entrypoints
 config/
   universe.yaml         # WIG20 members + indices + delisted tickers (ISIN-keyed)
-  backtest.yaml         # costs, walk-forward windows, capital, seed
+  backtest.yaml         # costs, walk-forward windows, capital, seed, universe gate
+  index_membership.yaml # point-in-time index revisions (fill real GPW dates)
+  corporate_actions.yaml # dividends/splits/rights by ex-date (fill from ESPI)
+  data_quality.yaml     # check-data thresholds
   llm.yaml              # models, pinned providers, caching (Phase 2)
   news_sources.yaml     # live-verified RSS feeds + per-feed timezone quirks
   strategies/*.yaml     # one engine runs any strategy config
-tests/                  # 146 tests: features, point-in-time, risk, fills, metrics,
+tests/                  # 173 tests: features, point-in-time, risk, fills, metrics,
                         # collector, LLM contracts, A/B, reproducibility, e2e
 ```
 
@@ -162,6 +195,16 @@ tests/                  # 146 tests: features, point-in-time, risk, fills, metri
   `as_of_date <= T`; signals decide on *T*'s close and fill on the **next** bar;
   filings count only if published by end-of-day *T* (Europe/Warsaw).
   See `tests/test_point_in_time.py`.
+- **Next-open fills, enforced** — a fill lag `< 1` is rejected outright; every
+  fill derives from the fill bar's open (close fallback and lapsed orders are
+  recorded as auditable anomalies, never silent). `tests/test_fill_timing.py`.
+- **Point-in-time index membership** — with `universe.index` set, an instrument
+  that joined the index in year Y is absent from the tradable universe before Y;
+  exits on held positions always run. `tests/test_index_membership.py`.
+- **Corporate actions shield stops** — a gap explained by a recorded
+  split/dividend/rights issue re-bases the position and stop instead of firing
+  the ATR stop; the same gap without an action still fires it.
+  `tests/test_corporate_actions.py`.
 - **Anti-survivorship** — the universe includes delisted tickers (Getin Noble,
   Petrolinvest, BPH…), traded only within `[listed_from, delisted_on]`, and the
   full-market backfill stores every instrument that appears in the historical
@@ -201,10 +244,14 @@ condition — `llm_score >= 0.1` — as an entry gate.
 - `as_of_date` = the date a bar became available (EOD bar of day *D* ⇒
   `as_of_date = D`). Today's archive file exists **intraday with partial bars**;
   the default ingest window therefore ends yesterday until 18:00 Warsaw.
-- Prices are stored **raw** (`adjusted=0`); no adjusted series is ingested yet.
-  Splits/dividends therefore distort long momentum/SMA features — a known
-  limitation to fix before trusting fine-grained signals (the strategy-vs-
-  benchmark comparison is conservative: WIG20TR is total-return).
+- Prices are stored **raw** (`adjusted=0`). `make refdata` derives a
+  back-adjusted series (`adjusted=1`) from `config/corporate_actions.yaml` for
+  instruments that have recorded actions; the backtest still runs on raw prices
+  (with corporate-action stop shielding), so long momentum/SMA features remain
+  distorted across ex-dates until the fixture is filled and features are
+  switched — a deliberate, separate decision because it changes every
+  historical number. `make check-data` lists the exact dates that need action
+  entries (e.g. PZU 2015-11-30 and DNP 2025-07-31 show split-shaped −90% gaps).
 - Stooq's CSV endpoint (`--source stooq`) is kept as a fallback but has been
   login-gated since mid-2026; expect `StooqUnavailableError` without a session.
 
@@ -283,7 +330,9 @@ of collected filings before it can say anything (RSS has no backfill).
 
 - **Walk-forward parameter fitting** — the IS/OOS machinery exists but Phase-1
   parameters are fixed constants, so fitting is currently a documented no-op.
-- **Adjusted price series** — schema seam exists (`adjusted=1`), no source yet.
+- **Adjusted-price features** — the adjusted series is derived (`make refdata`)
+  but features still read raw prices; switching them is a one-line change with
+  system-wide metric consequences, deferred deliberately.
 - **Phase 3 — regime radar / turning points. Phase 4 — academic strategies
   (more YAMLs; same engine). Phase 5 — survey/profile. Phase 6 — multi-tenant
   auth** (the `user_id` column already threads everywhere).

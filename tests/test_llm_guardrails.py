@@ -262,6 +262,32 @@ def test_cap_requires_prices_for_configured_models(conn):
         LLMClient(conn, broken, transport=lambda *a: {}, api_key="k")
 
 
+def test_month_spend_uses_portable_range_not_like(conn):
+    """month_spend_usd sums only the current UTC month via a >=/< range and
+    emits no SQLite-only LIKE (portable to Postgres timestamptz)."""
+    import inspect
+    from datetime import datetime, timezone
+
+    src = inspect.getsource(LLMClient.month_spend_usd)
+    # the SQL itself must not use a SQLite-only LIKE prefix (docstring may mention it)
+    assert "LIKE ?" not in src and "created_at LIKE" not in src, \
+        "month query must use a portable >=/< range, not LIKE"
+
+    client = _make_client(conn, lambda body: json.dumps(_research_payload()))
+    now = datetime.now(timezone.utc)
+    this_month = now.strftime("%Y-%m")
+    other_month = "2000-01"  # far outside the current month
+    conn.execute("INSERT INTO llm_costs (created_at, role, model, cost_usd)"
+                 " VALUES (?, 'extraction', 'm', 2.50)",
+                 (f"{this_month}-15T12:00:00+00:00",))
+    conn.execute("INSERT INTO llm_costs (created_at, role, model, cost_usd)"
+                 " VALUES (?, 'extraction', 'm', 99.00)",
+                 (f"{other_month}-15T12:00:00+00:00",))
+    conn.commit()
+    # only the current-month row counts; the 2000-01 row is excluded
+    assert client.month_spend_usd() == pytest.approx(2.50)
+
+
 def test_pipeline_degrades_gracefully_without_burning_attempts(conn):
     """Budget exhaustion must not mark/bump filings — they wait for next month."""
     conn.execute("INSERT INTO instruments (id, ticker, name) VALUES (9, 'aaa', 'aaa')")

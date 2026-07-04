@@ -277,6 +277,44 @@ def test_full_span_fallback_is_flagged():
     assert res.metrics.get("walk_forward_windows") == 0
 
 
+def _fake_result(equity, walk_forward_windows):
+    from app.backtest.engine import BacktestResult
+    idx = pd.bdate_range("2020-01-01", periods=len(equity))
+    eq = pd.Series(equity, index=idx, dtype=float)
+    return BacktestResult(
+        equity_curve=eq, benchmark_curve=eq, trade_pnls=[1.0, -0.5],
+        total_buy_notional=1000.0,
+        metrics={"sharpe": 1.2, "cagr": 0.1, "max_drawdown": -0.05,
+                 "walk_forward_windows": walk_forward_windows},
+        benchmark_metrics={}, decisions=[],
+    )
+
+
+def test_full_span_run_is_not_logged_as_a_trial(conn):
+    """A full-span (in-sample) run must NOT pollute strategy_trials or yield a
+    DSR/percentile — an in-sample Sharpe can never become anti-luck evidence."""
+    from app import cli
+
+    strat = {"name": "s", "version": 1, "risk": {"max_open_positions": 8}}
+    bt_cfg = {"costs": {}, "walk_forward": {}, "initial_capital": 100000.0,
+              "validation": {"mc_sims": 0}}
+    eq = list(100000 + np.cumsum(np.full(300, 5.0)))  # a "good" in-sample curve
+
+    text, dsr, mc = cli._validate_run(
+        conn, strat, bt_cfg, _fake_result(eq, walk_forward_windows=0),
+        instruments=[], membership=None)
+    assert dsr is None and mc is None
+    assert "SKIPPED" in text
+    assert conn.execute("SELECT COUNT(*) FROM strategy_trials").fetchone()[0] == 0
+
+    # positive control: a genuine walk-forward run IS logged and scored
+    text2, dsr2, _ = cli._validate_run(
+        conn, strat, bt_cfg, _fake_result(eq, walk_forward_windows=3),
+        instruments=[], membership=None)
+    assert dsr2 is not None
+    assert conn.execute("SELECT COUNT(*) FROM strategy_trials").fetchone()[0] == 1
+
+
 def test_mc_marks_suspended_sessions_at_zero():
     """No-bar sessions value positions at 0 — the engine's MTM convention."""
     from tests.conftest import synthetic_series

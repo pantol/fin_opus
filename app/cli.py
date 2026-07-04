@@ -357,8 +357,22 @@ def _validate_run(conn, strategy_cfg, bt_cfg, result, instruments, membership,
     from the registry statistics, and (when run_mc) runs the random-entry
     Monte Carlo benchmark. Returns (report_text, dsr_result, mc_result).
     Deterministic.
+
+    A FULL-SPAN fallback run (walk_forward_windows == 0) is in-sample, not OOS:
+    it is NEVER logged into the trials registry and NEVER produces a DSR or
+    percentile, so an in-sample Sharpe can never masquerade as anti-luck
+    evidence (nor pollute the shared registry every future DSR reads).
+    Returns (note, None, None) in that case.
     """
     from app.backtest import mc_benchmark, validation
+
+    if result.metrics.get("walk_forward_windows") == 0:
+        return (
+            "\nValidation (anti-luck): SKIPPED — this is a full-span in-sample "
+            "run (no walk-forward split), so it is not logged as a trial and no "
+            "DSR / random-benchmark is computed.",
+            None, None,
+        )
 
     eq = result.equity_curve
     oos_start = eq.index[0].date().isoformat() if len(eq) else None
@@ -565,9 +579,13 @@ def cmd_ab(args) -> int:
     _, dsr, mc = _validate_run(conn, llm, bt_cfg, report.llm_result, instruments,
                                membership)
     gates = (bt_cfg.get("validation") or {}).get("gates") or {}
+    # A full-span in-sample A/B yields no DSR / percentile (dsr, mc are None):
+    # apply_validation_gates then fails CLOSED (unavailable evidence is not
+    # accepted), so an LLM candidate can never pass on in-sample data.
     report = ab_harness.apply_validation_gates(
-        report, dsr=dsr.dsr,
-        sharpe_percentile=mc.percentiles.get("sharpe") if mc.n_sims else None,
+        report, dsr=dsr.dsr if dsr is not None else None,
+        sharpe_percentile=(mc.percentiles.get("sharpe")
+                           if (mc is not None and mc.n_sims) else None),
         gates=gates,
     )
     print()

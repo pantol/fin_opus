@@ -90,7 +90,12 @@ python -m app.cli backtest --strategy trend_momentum   # skip the ingest step
 
 The backtest decides on day *T*'s close, fills at *T+1*'s open, and charges
 commission, both-sides half-spread, slippage, and a 10%-of-volume fill cap.
-Metrics are reported against buy-and-hold WIG20TR on the same dates.
+Metrics are reported against buy-and-hold WIG20TR on the same dates, followed
+by an **anti-luck validation block**: trials-to-date from the registry, the
+Deflated Sharpe Ratio, and the strategy's percentile against
+`validation.mc_sims` cost-matched random-entry strategies (config in
+`config/backtest.yaml`; write your kill criteria in `docs/kill_criteria.md`
+BEFORE looking at results).
 
 ### 4. Collect filings and news (standalone, ZERO LLM)
 
@@ -242,6 +247,17 @@ tests/                  # 173 tests: features, point-in-time, risk, fills, metri
   slippage, and a volume-participation cap. `tests/test_fills.py`.
 - **Walk-forward OOS, benchmark = WIG20TR** — metrics are measured out-of-sample
   against WIG20TR total return (never SPY).
+- **Purged walk-forward** — an embargo of `walk_forward.embargo_sessions`
+  trading sessions (default 252 = the longest feature lookback) separates each
+  train window from its test window, so no feature computed in OOS can read
+  train data. `tests/test_validation.py`.
+- **Anti-luck validation** — every backtest run lands in the `strategy_trials`
+  registry; reports carry the **Deflated Sharpe Ratio** (Bailey & López de
+  Prado; deflated by the number of distinct configs ever tried) and the
+  strategy's **percentile vs N cost-matched random-entry strategies** (same
+  trade count, holding periods, universe, sizing, and cost model). The A/B
+  acceptance gate requires OOS improvement AND the configured DSR/percentile
+  floors — deltas alone cannot tell luck from edge. `tests/test_validation.py`.
 - **Multi-tenant seam** — `user_id` column on decisions/positions/trades/equity.
 - **Strategies are YAML** — one engine evaluates any config.
 - **Reproducible LLM** — pinned provider (`allow_fallbacks: false`), served

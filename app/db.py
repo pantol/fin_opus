@@ -123,6 +123,22 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_corporate_actions_ex ON corporate_actions(instrument_id, ex_date);
 
+-- Trials registry (anti-luck): EVERY strategy/parameter set ever backtested
+-- is one trial. The Deflated Sharpe Ratio uses the number of distinct trials
+-- and the variance of their Sharpes — without this log, every reported Sharpe
+-- silently benefits from multiple testing.
+CREATE TABLE IF NOT EXISTS strategy_trials (
+    id               INTEGER PRIMARY KEY,
+    config_hash      TEXT NOT NULL,     -- sha256 over strategy + backtest knobs
+    strategy_name    TEXT NOT NULL,
+    strategy_version INTEGER NOT NULL,
+    run_at           TEXT NOT NULL,     -- ISO datetime, UTC
+    oos_start        TEXT,
+    oos_end          TEXT,
+    metrics_json     TEXT NOT NULL      -- includes sharpe_pp (per-period Sharpe)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_trials_hash ON strategy_trials(config_hash);
+
 -- Append-only journal of manual deviations from system signals. Rows are only
 -- ever inserted (no UPDATE/DELETE path exists in code).
 CREATE TABLE IF NOT EXISTS overrides (

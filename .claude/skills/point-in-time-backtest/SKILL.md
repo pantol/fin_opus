@@ -37,9 +37,16 @@ Apply whenever code touches market data, features, signals, sizing, or simulated
 
 ## 5. Walk-forward out-of-sample only
 - Optimize on an in-sample window, evaluate on the next out-of-sample window, then roll forward.
+- **Purge with an embargo**: leave >= the longest feature lookback (252 sessions) between each train window and its test window (`walk_forward.embargo_sessions`), or OOS features silently read train data.
 - In-sample metrics are NOT evidence. Report metrics on OOS data only.
 - Benchmark = WIG / WIG20TR (total return), never SPY.
 - Fewer parameters is better — every tuned knob inflates the backtest and degrades live results.
+
+## 5b. Anti-luck discipline (multiple testing)
+- EVERY backtested strategy/parameter set is a trial in `strategy_trials`; never bypass the registry.
+- Report the Deflated Sharpe Ratio alongside raw Sharpe: raw Sharpe without the trial count is not evidence.
+- A strategy must also beat cost-matched RANDOMNESS (random-entry Monte Carlo percentile), not just the index.
+- Acceptance gates require BOTH OOS improvement AND the configured DSR/percentile floors.
 
 ## 6. Self-check before finishing
 - [ ] Could any feature read data with `as_of_date > T`? If yes -> fix.

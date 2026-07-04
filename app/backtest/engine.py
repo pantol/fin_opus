@@ -731,8 +731,16 @@ class WalkForwardWindow:
     oos_end: pd.Timestamp
 
 
-def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_months: int) -> list[WalkForwardWindow]:
-    """Roll [IS | OOS] windows across the calendar. OOS windows are contiguous."""
+def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_months: int,
+                              embargo_sessions: int = 0) -> list[WalkForwardWindow]:
+    """Roll [IS | embargo | OOS] windows across the calendar.
+
+    `embargo_sessions` purges a gap of that many TRADING SESSIONS between the
+    end of each in-sample window and the start of its out-of-sample window, so
+    a feature with a lookback of up to `embargo_sessions` computed anywhere in
+    the OOS window can never read in-sample data (set it >= the longest
+    feature lookback — 252 sessions for ret_12m). 0 = contiguous (legacy).
+    """
     if len(calendar) == 0:
         return []
     windows: list[WalkForwardWindow] = []
@@ -742,11 +750,14 @@ def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_mo
 
     is_start = calendar[0]
     while True:
-        is_end = is_start + is_delta          # = oos_start
-        oos_start = is_end
-        oos_end = oos_start + oos_delta
-        if oos_start > final:
+        is_end = is_start + is_delta
+        # embargo: OOS starts `embargo_sessions` trading sessions AFTER is_end
+        first_idx = int(calendar.searchsorted(is_end))  # first session >= is_end
+        oos_idx = first_idx + int(embargo_sessions)
+        if oos_idx >= len(calendar):
             break
+        oos_start = calendar[oos_idx]
+        oos_end = oos_start + oos_delta
         windows.append(WalkForwardWindow(is_start, is_end, oos_start, min(oos_end, final)))
         if oos_end >= final:
             break
@@ -778,16 +789,25 @@ def run_walk_forward(
     """
     calendar = _trading_calendar(instruments)
     wf = bt_cfg["walk_forward"]
-    windows = make_walk_forward_windows(calendar, wf["in_sample_months"], wf["out_sample_months"])
+    windows = make_walk_forward_windows(
+        calendar, wf["in_sample_months"], wf["out_sample_months"],
+        embargo_sessions=int(wf.get("embargo_sessions", 0)),
+    )
 
     if not windows:
-        # not enough history for a full IS+OOS split -> single OOS pass
-        return run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg,
-                            membership=membership)
+        # Not enough history for IS + embargo + OOS -> single full-span pass.
+        # This is NOT out-of-sample; flag it so reports and the trials registry
+        # cannot silently present full-history metrics as OOS evidence.
+        result = run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg,
+                              membership=membership)
+        result.metrics["walk_forward_windows"] = 0
+        return result
 
     oos_start = windows[0].oos_start
     oos_end = windows[-1].oos_end
-    return run_backtest(
+    result = run_backtest(
         instruments, benchmark_close, strategy_cfg, bt_cfg,
         start=oos_start, end=oos_end, membership=membership,
     )
+    result.metrics["walk_forward_windows"] = len(windows)
+    return result

@@ -161,7 +161,14 @@ def cmd_backtest(args) -> int:
 
     _persist_results(conn, bt_cfg["user_id"], result, strategy_id=strategy_id,
                      params=strat)
+    if result.metrics.get("walk_forward_windows") == 0:
+        print("\nWARNING: not enough history for in-sample + embargo + OOS — "
+              "this is a FULL-SPAN run, NOT out-of-sample. Treat these metrics "
+              "as in-sample evidence only.")
     _print_metrics_table(result, bt_cfg["walk_forward"]["benchmark"])
+    validation_text, _dsr, _mc = _validate_run(conn, strat, bt_cfg, result,
+                                               instruments, membership)
+    print(validation_text)
     conn.close()
     return 0
 
@@ -259,6 +266,52 @@ def _print_llm_audit(conn, limit: int = 10) -> None:
               f"model={r['served_model']} provider={r['served_provider']} "
               f"gen={r['generation_id']} cache_hit={r['cache_hit']} "
               f"cached_tokens={r['cached_tokens']}")
+
+
+def _validate_run(conn, strategy_cfg, bt_cfg, result, instruments, membership,
+                  run_mc: bool = True):
+    """Anti-luck validation for one backtest result (Pack C).
+
+    Logs the run into the trials registry, computes the Deflated Sharpe Ratio
+    from the registry statistics, and (when run_mc) runs the random-entry
+    Monte Carlo benchmark. Returns (report_text, dsr_result, mc_result).
+    Deterministic.
+    """
+    from app.backtest import mc_benchmark, validation
+
+    eq = result.equity_curve
+    oos_start = eq.index[0].date().isoformat() if len(eq) else None
+    oos_end = eq.index[-1].date().isoformat() if len(eq) else None
+    metrics = dict(result.metrics)
+    metrics["sharpe_pp"] = validation.per_period_sharpe(eq)
+    validation.log_trial(
+        conn, cfg_hash=validation.config_hash(strategy_cfg, bt_cfg),
+        strategy_name=strategy_cfg["name"],
+        strategy_version=int(strategy_cfg["version"]),
+        oos_start=oos_start, oos_end=oos_end, metrics=metrics,
+    )
+    n_trials, var_pp = validation.trial_stats(conn)
+    dsr = validation.deflated_sharpe(eq, n_trials, var_pp)
+
+    v_cfg = bt_cfg.get("validation") or {}
+    mc = mc_benchmark.run_random_benchmark(
+        instruments, result, bt_cfg, strategy_cfg["risk"],
+        n_sims=int(v_cfg.get("mc_sims", 0)) if run_mc else 0,
+        seed=int(v_cfg.get("mc_seed", 4242)),
+        membership=membership,
+    )
+
+    lines = [
+        "",
+        "Validation (anti-luck):",
+        f"  trials to date        {dsr.n_trials} distinct config(s) ever backtested",
+        f"  raw sharpe (annual)   {result.metrics['sharpe']:.4f}",
+        f"  deflated sharpe DSR   {dsr.dsr:.4f}  "
+        f"[P(true Sharpe beats the expected max of {dsr.n_trials} luck trials); "
+        f"SR* = {dsr.sr_star:.5f}/period]",
+        mc.as_text(),
+    ]
+    return "\n".join(lines), dsr, mc
 
 
 def _load_membership(conn, bt_cfg):
@@ -423,6 +476,19 @@ def cmd_ab(args) -> int:
           f"on {len(instruments)} instruments (OOS, realistic costs)...")
     report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg,
                                membership=membership)
+
+    # Anti-luck gates on the CANDIDATE (the LLM variant): the deltas gate alone
+    # cannot tell luck from edge (Pack C). Both trials land in the registry.
+    _validate_run(conn, baseline, bt_cfg, report.baseline_result, instruments,
+                  membership, run_mc=False)  # baseline: registry entry only
+    _, dsr, mc = _validate_run(conn, llm, bt_cfg, report.llm_result, instruments,
+                               membership)
+    gates = (bt_cfg.get("validation") or {}).get("gates") or {}
+    report = ab_harness.apply_validation_gates(
+        report, dsr=dsr.dsr,
+        sharpe_percentile=mc.percentiles.get("sharpe") if mc.n_sims else None,
+        gates=gates,
+    )
     print()
     print(report.as_text())
     conn.close()

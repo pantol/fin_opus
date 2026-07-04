@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 203 passing.
+ZERO LLM in the money path. **Tests:** 225 passing.
 
 ---
 
@@ -89,6 +89,30 @@ ZERO LLM in the money path. **Tests:** 203 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-03 — Pack C: validation methodology (purged walk-forward, DSR, MC benchmark)
+Anti-luck upgrade; 225 tests green (+15). Pure deterministic code, no LLM.
+- **Purged walk-forward:** `walk_forward.embargo_sessions` (default 252 = the
+  longest feature lookback, ret_12m) inserts a trading-session gap between
+  each IS window and its OOS window; a 252-lookback feature at the first OOS
+  date provably reads zero train data. NOTE: this shifts the OOS start by ~1
+  year, so headline metrics change vs Pack A/B runs — by design.
+- **Random-entry Monte Carlo benchmark:** `validation.mc_sims` (default 1000)
+  random strategies with the same trade count, bootstrapped holding periods,
+  universe/membership gating, fixed-fractional sizing, and full cost model
+  (next-open fills, spread, commission, slippage, volume cap); reports the
+  strategy's mid-rank percentile per metric (CAGR/Sharpe/maxDD). Deterministic
+  per seed.
+- **Trials registry + DSR:** every `backtest`/`ab` run logs into
+  `strategy_trials` (config-hash keyed; re-running the same config is the
+  same trial). Deflated Sharpe Ratio (Bailey & Lopez de Prado) computed from
+  distinct-trial count and per-period Sharpe variance; pure-python normal
+  CDF/PPF (erf + Acklam), no scipy. Trials=1 => SR*=0 (no deflation).
+- **Reporting + gates:** backtest report gains a validation block (trials,
+  raw Sharpe, DSR, random percentiles); the A/B acceptance verdict now
+  requires OOS improvement AND `validation.gates` floors (min_dsr,
+  min_random_percentile) — unavailable evidence fails the gate.
+- `docs/kill_criteria.md` template added (fill in BEFORE looking at results).
 
 ### 2026-07-03 — Pack B: infra & backup (snapshots, restore-test, healthchecks, status)
 VPS-reliability pack; 203 tests green (+21). The filings history is

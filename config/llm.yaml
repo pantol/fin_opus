@@ -31,3 +31,16 @@ cache:
   enabled: true
 
 request_timeout_seconds: 60
+
+# Per-model prices in USD per 1M tokens (openrouter.ai/models — keep current).
+# Required whenever budget.monthly_usd_cap is set: without a price, cost
+# tracking would undercount and the cap would never trigger.
+prices:
+  openai/gpt-4o-mini: {input_per_1m: 0.15, output_per_1m: 0.60}
+  openai/gpt-4o: {input_per_1m: 2.50, output_per_1m: 10.00}
+
+# Monthly HARD cap on LLM spend (USD, calendar month, UTC). When reached, live
+# LLM calls stop (cache hits still work — they are free), the pipeline records
+# the run as degraded (baseline-only) and a Telegram alert fires. null = no cap.
+budget:
+  monthly_usd_cap: 10.0

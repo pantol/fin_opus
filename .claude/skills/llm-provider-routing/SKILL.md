@@ -32,6 +32,11 @@ Apply whenever code calls an LLM. The LLM is a LANGUAGE layer only.
 ## 6. Validated JSON only
 - Define a JSON schema per call. Validate the response. Malformed -> REJECT and log; never guess or repair into a fabricated value.
 - Cross-check claims against the source where possible (e.g. an `evidence_quote` must appear in the source text; if not, lower confidence).
+- Schema + prompt change TOGETHER (additionalProperties:false rejects any drift); a prompt change invalidates the input-hash cache and re-spends.
+
+## 6b. Cost + evaluation guardrails
+- Every live call's cost (tokens x per-model price from config/llm.yaml) is ledgered in `llm_costs`; the monthly hard cap (`budget.monthly_usd_cap`) blocks LIVE calls only — cache hits stay free. Budget exhaustion degrades gracefully: run marked `degraded` in `llm_runs`, alert sent, filings left untouched — NEVER bump attempts for a budget stop (the wallet is empty, the filings are fine).
+- No prompt/model change ships if it regresses on the golden set (`make eval-llm` vs `eval_labels`); every eval run lands in `eval_runs` with the prompt fingerprint.
 
 ## 7. Self-check before finishing
 - [ ] Any LLM call in the sizing/risk/execution path? If yes -> remove.
@@ -40,3 +45,5 @@ Apply whenever code calls an LLM. The LLM is a LANGUAGE layer only.
 - [ ] Is caching keyed by input hash, and a hit verified (no duplicate network call + cached_tokens)?
 - [ ] Is the response validated against a schema, with malformed rejected (not guessed)?
 - [ ] Are point-in-time rules honored for the TEXT (published_at <= T) and the NUMBERS (as_of_date <= T) the prompt is built from?
+- [ ] Is the call's cost recorded, and does the monthly cap still trigger (prices present for every configured model)?
+- [ ] If the prompt/schema changed: did `make eval-llm` run without a regression, and was the cache re-spend accounted for?

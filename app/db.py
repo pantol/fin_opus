@@ -197,18 +197,46 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 );
 
 -- Materialized point-in-time LLM features per (instrument, as_of_date). The
--- backtest reads these deterministically; llm_score is the ONLY value injected
--- into the strategy feature snapshot.
+-- backtest reads these deterministically; llm_score and the numeric encoding
+-- of relevance are the only values injected into the strategy snapshot.
 CREATE TABLE IF NOT EXISTS llm_features (
     instrument_id INTEGER NOT NULL REFERENCES instruments(id),
     as_of_date    TEXT NOT NULL,    -- decision date the feature is valid for
     llm_score     REAL,             -- [-1, 1], derived from synthesis verdict/conviction
+    relevance     TEXT,             -- relevant_interesting / relevant_uninteresting / irrelevant
     research_json TEXT,
     synthesis_json TEXT,
     created_at    TEXT NOT NULL,
     PRIMARY KEY (instrument_id, as_of_date)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_features_asof ON llm_features(instrument_id, as_of_date);
+
+-- Per-call LLM cost ledger (tokens x per-model price from config/llm.yaml).
+-- The monthly hard cap sums cost_usd over the current UTC calendar month;
+-- cache hits are free and never appear here.
+CREATE TABLE IF NOT EXISTS llm_costs (
+    id                INTEGER PRIMARY KEY,
+    llm_call_id       INTEGER REFERENCES llm_calls(id),
+    created_at        TEXT NOT NULL,
+    role              TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    cost_usd          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_costs_created ON llm_costs(created_at);
+
+-- One row per LLM pipeline run (make llm): ok, or degraded (budget exhausted
+-- mid-run -> baseline-only operation). Absence of features is distinguishable
+-- from a degraded run only through this table.
+CREATE TABLE IF NOT EXISTS llm_runs (
+    id               INTEGER PRIMARY KEY,
+    run_at           TEXT NOT NULL,     -- ISO datetime, UTC
+    as_of_date       TEXT NOT NULL,     -- decision date T the run materialized for
+    status           TEXT NOT NULL,     -- ok / degraded
+    detail           TEXT,
+    features_written INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -256,3 +284,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     if not column_exists(conn, "instruments", "isin"):
         conn.execute("ALTER TABLE instruments ADD COLUMN isin TEXT")
+    if column_exists(conn, "llm_features", "llm_score") and not column_exists(
+            conn, "llm_features", "relevance"):
+        conn.execute("ALTER TABLE llm_features ADD COLUMN relevance TEXT")

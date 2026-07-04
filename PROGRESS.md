@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 225 passing.
+ZERO LLM in the money path. **Tests:** 242 passing.
 
 ---
 
@@ -89,6 +89,31 @@ ZERO LLM in the money path. **Tests:** 225 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-04 — Pack D: LLM guardrails (golden eval set, relevance, spend cap)
+Evaluation + cost guardrails on the LLM features layer; 242 tests green (+14).
+The LLM remains ONLY an input; all new logic is deterministic code.
+- **Golden eval set:** `eval_labels` (one human relevance label per filing,
+  upsert on relabel) + `make label` interactive Polish CLI (ZERO LLM). Target
+  50-100 labels.
+- **Prompt-regression harness:** `make eval-llm` runs the CURRENT research
+  prompt over the golden set; accuracy + per-class F1 vs labels, stored per
+  run in `eval_runs` with a prompt content fingerprint + model + served
+  provider. README rule: a regression blocks the prompt/model change.
+- **Discrete relevance:** `relevance` enum added ATOMICALLY to
+  RESEARCH_SCHEMA + prompt (additionalProperties:false makes one-sided
+  rollouts reject everything); materialized as llm_features.relevance and
+  exposed to strategies as numeric `llm_relevance`
+  (RELEVANCE_TO_SCORE in code, never the LLM); engine detection generalized
+  to any `llm_*` feature. Logged with every decision via the snapshot.
+  NOTE: the prompt change invalidates the llm_cache — next `make llm`
+  re-spends on unprocessed filings.
+- **Spend cap:** per-call cost ledger `llm_costs` (tokens x per-model price
+  from config; prices REQUIRED when a cap is set); monthly hard cap checked
+  between cache lookup and network (cache hits stay free); on exhaustion the
+  pipeline records a `degraded` run in `llm_runs`, sends a Polish Telegram
+  alert, exits 3, and leaves interrupted filings untouched (no processed
+  flags, no attempt bumps — the wallet is empty, the filings are fine).
 
 ### 2026-07-03 — Pack C: validation methodology (purged walk-forward, DSR, MC benchmark)
 Anti-luck upgrade; 225 tests green (+15). Pure deterministic code, no LLM.

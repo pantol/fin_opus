@@ -108,16 +108,19 @@ def compute_feature_for_date(
     conn.execute(
         """
         INSERT INTO llm_features
-            (instrument_id, as_of_date, llm_score, research_json, synthesis_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (instrument_id, as_of_date, llm_score, relevance, research_json,
+             synthesis_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(instrument_id, as_of_date) DO UPDATE SET
-            llm_score=excluded.llm_score, research_json=excluded.research_json,
+            llm_score=excluded.llm_score, relevance=excluded.relevance,
+            research_json=excluded.research_json,
             synthesis_json=excluded.synthesis_json, created_at=excluded.created_at
         """,
         (
             instrument_id,
             as_of_date,
             verdict["llm_score"],
+            research.get("relevance"),
             json.dumps(research, sort_keys=True),
             json.dumps(verdict, sort_keys=True),
             _now(),
@@ -154,6 +157,15 @@ def _giveup_exhausted(conn, filing_ids) -> int:
     return len(exhausted)
 
 
+# Deterministic numeric encoding of the discrete relevance label — the strategy
+# rule engine consumes numbers only. The mapping is code, never the LLM.
+RELEVANCE_TO_SCORE = {
+    "relevant_interesting": 1.0,
+    "relevant_uninteresting": 0.0,
+    "irrelevant": -1.0,
+}
+
+
 def load_llm_scores(conn, instrument_id: int) -> pd.Series:
     """Load all materialized llm_score values for an instrument as a date-indexed
     Series (ascending). Empty Series if none. The backtest reads this
@@ -167,3 +179,22 @@ def load_llm_scores(conn, instrument_id: int) -> pd.Series:
         return pd.Series(dtype=float)
     idx = pd.to_datetime([r["as_of_date"] for r in rows])
     return pd.Series([r["llm_score"] for r in rows], index=idx, dtype=float)
+
+
+def load_llm_relevance(conn, instrument_id: int) -> pd.Series:
+    """Numeric llm_relevance series (RELEVANCE_TO_SCORE encoding), date-indexed.
+
+    Rows without a relevance label (pre-Pack-D materializations) are skipped —
+    a missing feature fails a strategy condition rather than being guessed.
+    """
+    rows = conn.execute(
+        "SELECT as_of_date, relevance FROM llm_features"
+        " WHERE instrument_id = ? AND relevance IS NOT NULL ORDER BY as_of_date ASC",
+        (instrument_id,),
+    ).fetchall()
+    encoded = [(r["as_of_date"], RELEVANCE_TO_SCORE.get(r["relevance"]))
+               for r in rows if r["relevance"] in RELEVANCE_TO_SCORE]
+    if not encoded:
+        return pd.Series(dtype=float)
+    idx = pd.to_datetime([d for d, _ in encoded])
+    return pd.Series([v for _, v in encoded], index=idx, dtype=float)

@@ -32,6 +32,7 @@ def _make_client(content):
 def _research_json(**over):
     base = {
         "sentiment": 0.6,
+        "relevance": "relevant_interesting",
         "catalysts": ["new contract"],
         "risks": [],
         "event_type": "contract",

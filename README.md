@@ -119,10 +119,33 @@ python -m app.cli llm --ticker pko              # a single instrument
 
 For each instrument with unprocessed filings published up to the decision
 date (end-of-day Europe/Warsaw), the pipeline runs research → judge on the
-filing TEXT, validates strict JSON, and stores one `llm_score` in [-1, 1] in
-`llm_features`. Every call logs the served provider/model/generation id and
-cache status (printed as a provider audit) for reproducibility. Results are
-cached by input hash, so replays cost nothing.
+filing TEXT, validates strict JSON, and stores one `llm_score` in [-1, 1]
+plus a discrete `relevance` label (`relevant_interesting` /
+`relevant_uninteresting` / `irrelevant`, exposed to strategies as the numeric
+`llm_relevance` feature) in `llm_features`. Every call logs the served
+provider/model/generation id and cache status (printed as a provider audit)
+for reproducibility. Results are cached by input hash, so replays cost nothing.
+
+**Spend cap:** every live call's cost (tokens × per-model price from
+`config/llm.yaml`) lands in `llm_costs`; when the month's total reaches
+`budget.monthly_usd_cap`, live calls STOP, the run is recorded as `degraded`
+in `llm_runs` (baseline-only operation — unprocessed filings simply wait), a
+Polish Telegram alert fires, and `make llm` exits 3. Cache hits are free and
+keep working.
+
+### 5b. Golden eval set: label filings, catch prompt regressions
+
+```bash
+make label                      # label filings one at a time (interactive, ZERO LLM)
+make eval-llm                   # current research prompt vs your labels (accuracy + F1)
+```
+
+Label 50–100 filings (`eval_labels`), then run `make eval-llm` after ANY
+prompt or model change: it scores the CURRENT research prompt against your
+labels and stores each run in `eval_runs` (prompt fingerprint, model, served
+provider, accuracy, per-class F1). **Rule: no prompt/model change ships if it
+regresses on the golden set.** Note that changing the prompt invalidates the
+input-hash cache — the next `make llm` re-spends on unprocessed filings.
 
 ### 6. A/B: does the LLM gate actually help?
 
@@ -194,11 +217,13 @@ app/
     engine.py           # event-driven sim + walk-forward OOS harness
     ab_harness.py       # baseline vs baseline+LLM comparison (same engine/costs)
   llm/
-    client.py           # OpenRouter wrapper: pinned provider, audit log, input-hash cache
+    client.py           # OpenRouter wrapper: pinned provider, audit log, input-hash cache,
+                        # per-call cost ledger + monthly hard cap
     schemas.py          # strict JSON validation — malformed is rejected, never guessed
     research.py         # extraction agent (filing text -> structured JSON + evidence check)
     synthesis.py        # judge (research + quant context -> verdict -> llm_score)
     pipeline.py         # materializes point-in-time llm_features rows
+    evalset.py          # golden-set labeling CLI + prompt-regression harness
   logging/decisions.py  # persist decisions + feature snapshots + trades + equity
   alerts/
     telegram.py         # alert stub (dry-run prints a Polish card if no token)
@@ -263,6 +288,13 @@ tests/                  # 173 tests: features, point-in-time, risk, fills, metri
 - **Reproducible LLM** — pinned provider (`allow_fallbacks: false`), served
   provider/model/generation id logged on every call, local cache by input hash,
   malformed JSON rejected (never repaired).
+- **LLM spend is capped, degradation is graceful** — per-call costs ledgered in
+  `llm_costs`; at the monthly cap live calls stop, the run is marked `degraded`
+  and filings wait untouched (no retry attempts burned).
+  `tests/test_llm_guardrails.py`.
+- **Prompt changes are evaluated, not vibes-shipped** — `make eval-llm` scores
+  the current research prompt against the human-labeled golden set; a
+  regression blocks the change. `tests/test_llm_guardrails.py`.
 
 ## Strategy config (example: `config/strategies/trend_momentum.yaml`)
 

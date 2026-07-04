@@ -53,6 +53,9 @@ class Instrument:
     # When present, the as-of value is injected as `llm_score` into the snapshot.
     # The LLM is ALWAYS only an INPUT here -- sizing/risk stays deterministic.
     llm_scores: pd.Series | None = None
+    # Optional numeric relevance encoding (pipeline.RELEVANCE_TO_SCORE),
+    # injected as `llm_relevance`. Same point-in-time rules as llm_scores.
+    llm_relevance: pd.Series | None = None
     # Corporate actions keyed by ISO ex-date -> list of
     # {action_type, value_or_ratio}. Used to shield stops/positions from gaps
     # that are not market moves (splits, dividends, rights issues).
@@ -362,12 +365,15 @@ def run_backtest(
             close = snap.get("close")
             if close is None:
                 continue
-            # Inject the point-in-time LLM score (only data with date <= T) as a
-            # plain feature. It feeds the YAML rule like any other feature; sizing
-            # and risk remain deterministic (CLAUDE.md rule 1).
-            llm_score = _llm_score_on(inst, day)
+            # Inject the point-in-time LLM features (only data with date <= T) as
+            # plain features. They feed the YAML rules like any other feature;
+            # sizing and risk remain deterministic (CLAUDE.md rule 1).
+            llm_score = _series_asof(inst.llm_scores, day)
             if llm_score is not None:
                 snap["llm_score"] = llm_score
+            llm_relevance = _series_asof(inst.llm_relevance, day)
+            if llm_relevance is not None:
+                snap["llm_relevance"] = llm_relevance
 
             in_pos = inst.ticker in positions
             has_pending_buy = inst.ticker in pending_buys
@@ -599,29 +605,30 @@ def _apply_action_to_order(order: dict, action: dict) -> None:
             order["stop_price"] *= value
 
 
-def _llm_score_on(inst: Instrument, day: pd.Timestamp):
-    """Point-in-time LLM score: the last score with date <= `day`, or None.
+def _series_asof(series: pd.Series | None, day: pd.Timestamp):
+    """Point-in-time read: the last value with date <= `day`, or None.
 
-    No look-ahead: a score materialized for a later date is never visible at T.
+    No look-ahead: a value materialized for a later date is never visible at T.
     """
-    scores = inst.llm_scores
-    if scores is None or scores.empty:
+    if series is None or series.empty:
         return None
-    eligible = scores.loc[scores.index <= day]
+    eligible = series.loc[series.index <= day]
     if eligible.empty:
         return None
     val = eligible.iloc[-1]
     return None if pd.isna(val) else float(val)
 
 
-def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
-    """True if any condition in the strategy config references the `llm_score`
-    feature. Used to decide whether to attach materialized LLM scores before a
-    plain backtest (so an LLM strategy is not silently starved of its gate).
+def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
+    """True if any condition references an `llm_*` feature (llm_score,
+    llm_relevance, ...). Used to decide whether to attach materialized LLM
+    features before a backtest (so an LLM strategy is not silently starved of
+    its gate).
     """
     def _walk(node) -> bool:
         if isinstance(node, dict):
-            if node.get("feature") == "llm_score":
+            feature = node.get("feature")
+            if isinstance(feature, str) and feature.startswith("llm_"):
                 return True
             return any(_walk(v) for v in node.values())
         if isinstance(node, (list, tuple)):
@@ -629,6 +636,14 @@ def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
         return False
 
     return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+
+
+# Backwards-compatible aliases (pre-Pack-D names).
+strategy_uses_llm_score = strategy_uses_llm_features
+
+
+def _llm_score_on(inst: Instrument, day: pd.Timestamp):
+    return _series_asof(inst.llm_scores, day)
 
 
 def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
@@ -640,12 +655,14 @@ def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
     out: list[Instrument] = []
     for inst in instruments:
         scores = pipeline.load_llm_scores(conn, inst.instrument_id)
+        relevance = pipeline.load_llm_relevance(conn, inst.instrument_id)
         out.append(
             Instrument(
                 instrument_id=inst.instrument_id, ticker=inst.ticker,
                 sector=inst.sector, listed_from=inst.listed_from,
                 delisted_on=inst.delisted_on, prices=inst.prices,
-                features=inst.features, llm_scores=scores, actions=inst.actions,
+                features=inst.features, llm_scores=scores,
+                llm_relevance=relevance, actions=inst.actions,
             )
         )
     return out

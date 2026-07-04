@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status label eval-llm clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -58,6 +58,16 @@ ab-offline: ingest-offline
 # materialized rows with NO LLM call — the LLM is only an INPUT.
 llm:
 	$(PYTHON) -m app.cli llm
+
+# Label collected filings for the golden eval set (interactive; ZERO LLM).
+label:
+	$(PYTHON) -m app.cli label
+
+# Prompt-regression harness: run the CURRENT research prompt against the
+# golden set; accuracy + per-class F1 vs your labels, history in eval_runs.
+# README rule: no prompt/model change ships if it regresses here.
+eval-llm:
+	$(PYTHON) -m app.cli eval-llm
 
 # ESPI/EBI + news collector (standalone, ZERO LLM). One-shot cycle.
 collect:

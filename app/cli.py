@@ -132,10 +132,10 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
-    # If the strategy gates on `llm_score`, attach point-in-time LLM features
-    # (materialized earlier; read deterministically, NO LLM call). Otherwise the
-    # gate would never see a score and silently block every entry.
-    if engine.strategy_uses_llm_score(strat):
+    # If the strategy gates on any llm_* feature, attach point-in-time LLM
+    # features (materialized earlier; read deterministically, NO LLM call).
+    # Otherwise the gate would never see a value and silently block every entry.
+    if engine.strategy_uses_llm_features(strat):
         instruments = engine.attach_llm_scores(conn, instruments)
         with_scores = sum(
             1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
@@ -211,9 +211,15 @@ def cmd_llm(args) -> int:
             conn.close()
             return 1
 
+    from datetime import timezone as _tz
+
+    from app.alerts import telegram
+    from app.llm.client import LLMBudgetExceededError
+
     print(f"Materializing LLM features as of {as_of} "
           f"(filings cutoff: end of day, Europe/Warsaw)...")
     n_features = n_nothing = 0
+    degraded_reason = None
     for entry in entries:
         ticker = entry["ticker"].lower()
         row = conn.execute(
@@ -233,10 +239,17 @@ def cmd_llm(args) -> int:
             if snap:
                 quant_score = snap.get("momentum_6m")
 
-        verdict = llm_pipeline.compute_feature_for_date(
-            conn, client, instrument_id=inst_id, ticker=ticker,
-            as_of_date=as_of, quant_score=quant_score,
-        )
+        try:
+            verdict = llm_pipeline.compute_feature_for_date(
+                conn, client, instrument_id=inst_id, ticker=ticker,
+                as_of_date=as_of, quant_score=quant_score,
+            )
+        except LLMBudgetExceededError as exc:
+            # Budget, not a bad filing: nothing was marked processed or attempt-
+            # bumped for the interrupted instrument — those filings simply wait.
+            degraded_reason = str(exc)
+            print(f"  {ticker:10s} STOPPED: {exc}")
+            break
         if verdict is None:
             n_nothing += 1  # no unprocessed filings, or rejected (logged)
         else:
@@ -244,9 +257,77 @@ def cmd_llm(args) -> int:
             print(f"  {ticker:10s} llm_score={verdict['llm_score']:+.3f} "
                   f"({verdict['verdict']}, conviction={verdict['conviction']:.2f})")
 
+    status = "degraded" if degraded_reason else "ok"
+    conn.execute(
+        "INSERT INTO llm_runs (run_at, as_of_date, status, detail, features_written)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (datetime.now(_tz.utc).isoformat(), as_of, status, degraded_reason,
+         n_features),
+    )
+    conn.commit()
+
     print(f"\nMaterialized {n_features} feature rows; "
           f"{n_nothing} instruments had nothing to process.")
+    if degraded_reason:
+        print("RUN DEGRADED: monthly LLM budget exhausted — the pipeline "
+              "continues WITHOUT new LLM features (baseline-only).")
+        telegram.send_text(
+            "⚠️ Budzet LLM wyczerpany\n"
+            f"Data decyzji: {as_of}\n"
+            "Pipeline dziala w trybie awaryjnym (bez nowych cech LLM).\n"
+            f"Szczegoly: {degraded_reason}"
+        )
     _print_llm_audit(conn)
+    conn.close()
+    return 3 if degraded_reason else 0
+
+
+def cmd_label(args) -> int:
+    """Interactive golden-set labeling of collected filings (ZERO LLM calls)."""
+    from app.llm import evalset
+
+    conn = connect(args.db)
+    init_db(conn)
+    user = args.user or cfg.load_backtest_config()["user_id"]
+    evalset.run_labeling(conn, user)
+    conn.close()
+    return 0
+
+
+def cmd_eval_llm(args) -> int:
+    """Prompt-regression harness: current research prompt vs the golden set."""
+    import os
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("ERROR: OPENROUTER_API_KEY is not set; cannot call OpenRouter.")
+        return 2
+
+    from app.llm import evalset
+    from app.llm.client import LLMBudgetExceededError, LLMClient
+
+    conn = connect(args.db)
+    init_db(conn)
+    client = LLMClient(conn, cfg.load_llm_config())
+    try:
+        report = evalset.run_eval(conn, client)
+    except LLMBudgetExceededError as exc:
+        print(f"STOPPED: {exc}")
+        conn.close()
+        return 3
+    if report is None:
+        print("No labeled filings yet — run `make label` first (target: 50-100).")
+        conn.close()
+        return 1
+    print(report.as_text())
+    prev = evalset.previous_run(conn, report.prompt_version, report.requested_model)
+    if prev:
+        delta = report.accuracy - prev["accuracy"]
+        print(f"\nvs previous config (prompt {prev['prompt_version']}, "
+              f"model {prev['requested_model']}): accuracy "
+              f"{prev['accuracy']:.3f} -> {report.accuracy:.3f} ({delta:+.3f})")
+        if delta < 0:
+            print("REGRESSION vs the previous configuration — do NOT ship this "
+                  "prompt/model change (README rule).")
     conn.close()
     return 0
 
@@ -577,6 +658,12 @@ def main(argv=None) -> int:
     ov.add_argument("--reason", required=True, help="Why you deviated from the signal")
     ov.add_argument("--user", default=None,
                     help="user_id (default: backtest.yaml user_id)")
+    lbl = sub.add_parser("label",
+                         help="Label filings for the golden eval set (interactive, no LLM)")
+    lbl.add_argument("--user", default=None,
+                     help="labeled_by (default: backtest.yaml user_id)")
+    sub.add_parser("eval-llm",
+                   help="Prompt-regression eval: current research prompt vs the golden set")
     sub.add_parser("backup",
                    help="Online DB snapshot (VACUUM INTO) + R2 upload + retention")
     sub.add_parser("restore-test",
@@ -601,6 +688,10 @@ def main(argv=None) -> int:
         return cmd_check_data(args)
     if args.command == "override":
         return cmd_override(args)
+    if args.command == "label":
+        return cmd_label(args)
+    if args.command == "eval-llm":
+        return cmd_eval_llm(args)
     if args.command == "backup":
         return cmd_backup(args)
     if args.command == "restore-test":

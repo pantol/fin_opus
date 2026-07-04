@@ -145,9 +145,10 @@ def test_restore_test_ok_on_good_snapshot(tmp_path):
 def test_restore_test_fails_on_corrupt_snapshot(tmp_path):
     live = _build_live_db(tmp_path / "live.db")
     snap = bkp.make_snapshot(live, tmp_path / "backups")
-    # corrupt the middle of the file, keeping the SQLite header intact
+    # corrupt everything past the SQLite header — a targeted 256-byte patch can
+    # land in an unused page and legitimately pass integrity_check
     data = bytearray(snap.read_bytes())
-    data[len(data) // 2:len(data) // 2 + 256] = b"\xff" * 256
+    data[100:] = b"\xff" * (len(data) - 100)
     snap.write_bytes(bytes(data))
     report = bkp.run_restore_test(live, _cfg(tmp_path), client=None)
     assert not report.ok

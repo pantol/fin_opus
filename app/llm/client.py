@@ -182,11 +182,22 @@ class LLMClient:
         return result
 
     def month_spend_usd(self) -> float:
-        """Total recorded spend in the current UTC calendar month."""
-        month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
+        """Total recorded spend in the current UTC calendar month.
+
+        Uses a half-open range predicate on the ISO `created_at` string rather
+        than a LIKE prefix, so it stays portable to Postgres/TimescaleDB where
+        created_at is a real timestamptz (CLAUDE.md: no SQLite-only hacks). ISO
+        timestamps sort lexicographically, so string bounds are correct.
+        """
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_month = (month_start.replace(year=month_start.year + 1, month=1)
+                      if month_start.month == 12
+                      else month_start.replace(month=month_start.month + 1))
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM llm_costs WHERE created_at LIKE ?",
-            (f"{month_prefix}%",),
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM llm_costs"
+            " WHERE created_at >= ? AND created_at < ?",
+            (month_start.isoformat(), next_month.isoformat()),
         ).fetchone()
         return float(row[0])
 

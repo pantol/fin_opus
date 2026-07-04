@@ -40,6 +40,15 @@ Transport = Callable[[str, dict, dict, int], dict]
 MetaTransport = Callable[[str, dict, int], dict]
 
 
+class LLMBudgetExceededError(RuntimeError):
+    """Monthly LLM spend cap reached: live calls must stop.
+
+    The pipeline catches this to degrade gracefully (baseline-only) — it must
+    NOT be treated like a malformed response (no attempt bumping: the filings
+    are fine, the wallet is empty).
+    """
+
+
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -79,6 +88,8 @@ class LLMResult:
         cached_tokens: int | None,
         cache_hit: bool,
         input_hash: str,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ) -> None:
         self.content = content
         self.served_model = served_model
@@ -87,6 +98,8 @@ class LLMResult:
         self.cached_tokens = cached_tokens
         self.cache_hit = cache_hit
         self.input_hash = input_hash
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
 
 
 class LLMClient:
@@ -112,6 +125,21 @@ class LLMClient:
         self._meta_transport = meta_transport or _default_meta_transport
         # API key required only for a real network call; tests inject transport.
         self._api_key = api_key if api_key is not None else os.environ.get("OPENROUTER_API_KEY")
+        # Monthly spend cap (USD). When set, every configured model MUST have a
+        # price entry — an unpriced model would undercount cost and the cap
+        # would silently never trigger.
+        budget = llm_config.get("budget") or {}
+        cap = budget.get("monthly_usd_cap")
+        self.monthly_cap = float(cap) if cap is not None else None
+        if self.monthly_cap is not None:
+            prices = llm_config.get("prices") or {}
+            for role in ("extraction", "synthesis"):
+                model = (llm_config.get(role) or {}).get("model")
+                if model and model not in prices:
+                    raise ValueError(
+                        f"budget.monthly_usd_cap is set but prices['{model}'] is "
+                        f"missing in config/llm.yaml — the cap could never trigger"
+                    )
 
     # -- public API ---------------------------------------------------------
     def complete_json(self, role: str, messages: list[dict]) -> LLMResult:
@@ -137,6 +165,10 @@ class LLMClient:
             self._log_call(role, model, result)
             return result
 
+        # Spend cap: only LIVE calls cost money, so the check sits between the
+        # cache lookup and the network — replays from cache always work.
+        self._check_budget()
+
         response = self._post(model, params, messages)
         # The chat response has no provider; resolve it from generation metadata
         # and stash it under a private key so a later cache hit keeps it too.
@@ -145,8 +177,45 @@ class LLMClient:
         if self.cache_enabled:
             self._cache_put(ihash, response)
         result = self._result_from_response(response, ihash, cache_hit=False)
-        self._log_call(role, model, result)
+        call_id = self._log_call(role, model, result)
+        self._record_cost(call_id, role, model, result)
         return result
+
+    def month_spend_usd(self) -> float:
+        """Total recorded spend in the current UTC calendar month."""
+        month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM llm_costs WHERE created_at LIKE ?",
+            (f"{month_prefix}%",),
+        ).fetchone()
+        return float(row[0])
+
+    def _check_budget(self) -> None:
+        if self.monthly_cap is None:
+            return
+        spent = self.month_spend_usd()
+        if spent >= self.monthly_cap:
+            raise LLMBudgetExceededError(
+                f"monthly LLM budget exhausted: {spent:.2f} USD spent, cap is "
+                f"{self.monthly_cap:.2f} USD (config/llm.yaml budget.monthly_usd_cap)"
+            )
+
+    def _record_cost(self, call_id: int | None, role: str, model: str,
+                     result: LLMResult) -> None:
+        """Append the per-call cost (tokens x per-model config price)."""
+        prices = (self.cfg.get("prices") or {}).get(model) or {}
+        cost = 0.0
+        if result.prompt_tokens:
+            cost += result.prompt_tokens / 1e6 * float(prices.get("input_per_1m", 0.0))
+        if result.completion_tokens:
+            cost += result.completion_tokens / 1e6 * float(prices.get("output_per_1m", 0.0))
+        self.conn.execute(
+            "INSERT INTO llm_costs (llm_call_id, created_at, role, model,"
+            " prompt_tokens, completion_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (call_id, _now_utc_iso(), role, model,
+             result.prompt_tokens, result.completion_tokens, cost),
+        )
+        self.conn.commit()
 
     def _resolve_provider(self, generation_id: str | None) -> str | None:
         """Best-effort fetch of the served provider from generation metadata.
@@ -203,6 +272,8 @@ class LLMClient:
             cached_tokens=details.get("cached_tokens"),
             cache_hit=cache_hit,
             input_hash=ihash,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
         )
 
     def _cache_get(self, ihash: str) -> dict | None:
@@ -222,8 +293,8 @@ class LLMClient:
         )
         self.conn.commit()
 
-    def _log_call(self, role: str, requested_model: str, result: LLMResult) -> None:
-        self.conn.execute(
+    def _log_call(self, role: str, requested_model: str, result: LLMResult) -> int | None:
+        cur = self.conn.execute(
             """
             INSERT INTO llm_calls
                 (created_at, role, requested_model, served_model, served_provider,
@@ -243,3 +314,4 @@ class LLMClient:
             ),
         )
         self.conn.commit()
+        return cur.lastrowid

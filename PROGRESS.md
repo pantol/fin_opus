@@ -5,8 +5,9 @@
 
 **Current phase:** Phase 2 (LLM FEATURES layer) — **plumbing COMPLETE & green;
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
-standalone ESPI/EBI collector remain complete. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 121 passing.
+standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
+C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
+ZERO LLM in the money path. **Tests:** 242 passing.
 
 ---
 
@@ -69,6 +70,10 @@ ZERO LLM in the money path. **Tests:** 121 passing.
 
 ## Invariants (enforced by tests)
 
+- [x] Next-open fills enforced: lag >= 1 or raise; no fill from the signal bar; fill anomalies audited (`tests/test_fill_timing.py`)
+- [x] Point-in-time index membership: no trading before `date_from` (`tests/test_index_membership.py`)
+- [x] Corporate-action gaps shield the ATR stop instead of firing it; unexplained gaps still fire (`tests/test_corporate_actions.py`)
+- [x] Data-quality monitor: missing sessions, bad volume, unexplained jumps, stale tickers (`tests/test_data_quality.py`)
 - [x] Point-in-time / no look-ahead (`tests/test_point_in_time.py`)
 - [x] Anti-survivorship: delisted tickers traded only in `[listed_from, delisted_on]` (`tests/test_integration.py`)
 - [x] Deterministic money logic, reproducible with pinned seed (`tests/test_risk.py`, `tests/test_integration.py`)
@@ -84,6 +89,107 @@ ZERO LLM in the money path. **Tests:** 121 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-04 — Pack D: LLM guardrails (golden eval set, relevance, spend cap)
+Evaluation + cost guardrails on the LLM features layer; 242 tests green (+14).
+The LLM remains ONLY an input; all new logic is deterministic code.
+- **Golden eval set:** `eval_labels` (one human relevance label per filing,
+  upsert on relabel) + `make label` interactive Polish CLI (ZERO LLM). Target
+  50-100 labels.
+- **Prompt-regression harness:** `make eval-llm` runs the CURRENT research
+  prompt over the golden set; accuracy + per-class F1 vs labels, stored per
+  run in `eval_runs` with a prompt content fingerprint + model + served
+  provider. README rule: a regression blocks the prompt/model change.
+- **Discrete relevance:** `relevance` enum added ATOMICALLY to
+  RESEARCH_SCHEMA + prompt (additionalProperties:false makes one-sided
+  rollouts reject everything); materialized as llm_features.relevance and
+  exposed to strategies as numeric `llm_relevance`
+  (RELEVANCE_TO_SCORE in code, never the LLM); engine detection generalized
+  to any `llm_*` feature. Logged with every decision via the snapshot.
+  NOTE: the prompt change invalidates the llm_cache — next `make llm`
+  re-spends on unprocessed filings.
+- **Spend cap:** per-call cost ledger `llm_costs` (tokens x per-model price
+  from config; prices REQUIRED when a cap is set); monthly hard cap checked
+  between cache lookup and network (cache hits stay free); on exhaustion the
+  pipeline records a `degraded` run in `llm_runs`, sends a Polish Telegram
+  alert, exits 3, and leaves interrupted filings untouched (no processed
+  flags, no attempt bumps — the wallet is empty, the filings are fine).
+
+### 2026-07-03 — Pack C: validation methodology (purged walk-forward, DSR, MC benchmark)
+Anti-luck upgrade; 225 tests green (+15). Pure deterministic code, no LLM.
+- **Purged walk-forward:** `walk_forward.embargo_sessions` (default 252 = the
+  longest feature lookback, ret_12m) inserts a trading-session gap between
+  each IS window and its OOS window; a 252-lookback feature at the first OOS
+  date provably reads zero train data. NOTE: this shifts the OOS start by ~1
+  year, so headline metrics change vs Pack A/B runs — by design.
+- **Random-entry Monte Carlo benchmark:** `validation.mc_sims` (default 1000)
+  random strategies with the same trade count, bootstrapped holding periods,
+  universe/membership gating, fixed-fractional sizing, and full cost model
+  (next-open fills, spread, commission, slippage, volume cap); reports the
+  strategy's mid-rank percentile per metric (CAGR/Sharpe/maxDD). Deterministic
+  per seed.
+- **Trials registry + DSR:** every `backtest`/`ab` run logs into
+  `strategy_trials` (config-hash keyed; re-running the same config is the
+  same trial). Deflated Sharpe Ratio (Bailey & Lopez de Prado) computed from
+  distinct-trial count and per-period Sharpe variance; pure-python normal
+  CDF/PPF (erf + Acklam), no scipy. Trials=1 => SR*=0 (no deflation).
+- **Reporting + gates:** backtest report gains a validation block (trials,
+  raw Sharpe, DSR, random percentiles); the A/B acceptance verdict now
+  requires OOS improvement AND `validation.gates` floors (min_dsr,
+  min_random_percentile) — unavailable evidence fails the gate.
+- `docs/kill_criteria.md` template added (fill in BEFORE looking at results).
+
+### 2026-07-03 — Pack B: infra & backup (snapshots, restore-test, healthchecks, status)
+VPS-reliability pack; 203 tests green (+21). The filings history is
+irreplaceable — this pack protects it.
+- **Backups:** `make backup` = online snapshot via `VACUUM INTO` (never a
+  live-file copy) → Cloudflare R2 upload when `R2_*` env creds exist
+  (injectable S3 seam; boto3 as optional `[backup]` extra) → retention
+  N daily + first-of-month M monthlies, applied locally AND remotely
+  (config/backup.yaml).
+- **Restore verification:** `make restore-test` pulls the latest snapshot
+  (R2 else local), runs PRAGMA integrity_check, verifies expected tables,
+  row-count sanity vs live (snapshot > live = failure). Documented as a
+  monthly routine.
+- **Healthchecks:** dead-man's-switch pings (app/alerts/healthcheck.py) after
+  each fully healthy collector cycle (`HEALTHCHECK_URL_COLLECT`) and each
+  successful backup (`HEALTHCHECK_URL_BACKUP`); silent no-op when unset,
+  never raises.
+- **Status:** `make status` = prices freshness + collector heartbeat vs
+  threshold + filings backlog + newest snapshot age; Polish Telegram alert
+  and exit 2 when stale (cron-able).
+- **Schema unification:** `init_db` now also ensures the collector-owned
+  filings schema, killing the `no such table: filings` trap for `make llm`
+  on a DB where the collector never ran.
+
+### 2026-07-03 — Pack A: core hardening (next-open enforcement, membership, corporate actions, check-data, overrides)
+Hardening pack over the deterministic core; 173 tests green (+27). No new
+features, no LLM. Note: this entry also reconciles the stale counts above —
+between 2026-06-22 and this entry the repo gained real GPW-archive ingestion,
+verified ESPI/EBI feeds, LLM CLI wiring, and a README rewrite (commits
+`2b4d345`..`62f0a51`, 121 → 146 tests) that were not logged here.
+- **A.1 next-open fills:** already implemented (decide T close, fill T+1 open) —
+  now ENFORCED: `signal_to_fill_lag_days < 1` raises; lapsed orders and
+  close-fallback fills are recorded in `BacktestResult.fill_anomalies` (printed
+  by the CLI) instead of passing silently. Fixed a latent bug: a NULL open/close
+  on the fill bar produced a NaN reference price instead of falling back/lapsing.
+- **A.2 index membership:** `index_membership` table + `config/index_membership.yaml`
+  fixture (placeholder dates) + `make refdata` loader. Opt-in via
+  `universe.index` in backtest.yaml: entries gated on membership AS OF T;
+  exits on held positions always evaluate.
+- **A.3 corporate actions:** `corporate_actions` table + fixture + loader; on
+  ex-date the engine re-bases held positions (split: qty×r, entry/stop ÷r;
+  dividend: cash credit + stop −D; rights: stop ×factor) and in-flight orders,
+  so action gaps never fire the ATR stop as market moves — unexplained gaps
+  still do. Deterministic back-adjusted series derived into `adjusted=1` rows;
+  backtest stays on raw prices (separate decision).
+- **A.4 check-data + overrides:** `make check-data` (missing sessions vs the
+  benchmark-derived exchange calendar, volume<=0, jumps>threshold without a
+  matching action, stale tickers) + Polish Telegram alert via new generic
+  `send_text` (dry-run contract preserved). First real-data run immediately
+  flagged split-shaped −90% gaps on PZU (2015-11-30) and DNP (2025-07-31) —
+  fill `config/corporate_actions.yaml` accordingly. Append-only `overrides`
+  journal + `python -m app.cli override`.
 
 ### 2026-06-22 — Phase 2 review fixes (PIT tz, persist-then-mark, CLI gate, provider audit)
 Code-review hardening of the Phase-2 LLM features layer. 121 tests green

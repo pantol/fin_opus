@@ -53,6 +53,13 @@ class Instrument:
     # When present, the as-of value is injected as `llm_score` into the snapshot.
     # The LLM is ALWAYS only an INPUT here -- sizing/risk stays deterministic.
     llm_scores: pd.Series | None = None
+    # Optional numeric relevance encoding (pipeline.RELEVANCE_TO_SCORE),
+    # injected as `llm_relevance`. Same point-in-time rules as llm_scores.
+    llm_relevance: pd.Series | None = None
+    # Corporate actions keyed by ISO ex-date -> list of
+    # {action_type, value_or_ratio}. Used to shield stops/positions from gaps
+    # that are not market moves (splits, dividends, rights issues).
+    actions: dict[str, list[dict]] | None = None
 
 
 @dataclass
@@ -66,6 +73,9 @@ class BacktestResult:
     decisions: list[dict] = field(default_factory=list)
     cash_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     exposure_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    # Fill audit: orders whose fill bar had no open (close fallback) or no bar
+    # at all (lapsed). Not financial events -- kept out of `decisions`.
+    fill_anomalies: list[dict] = field(default_factory=list)
 
 
 def _alive(inst: Instrument, day: pd.Timestamp) -> bool:
@@ -109,9 +119,55 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
                 delisted_on=r["delisted_on"],
                 prices=df,
                 features=feats,
+                actions=_load_actions_map(conn, r["id"]),
             )
         )
     return instruments, bench_close
+
+
+def _load_actions_map(conn, instrument_id: int) -> dict[str, list[dict]] | None:
+    rows = conn.execute(
+        "SELECT action_type, ex_date, value_or_ratio FROM corporate_actions"
+        " WHERE instrument_id = ? ORDER BY ex_date",
+        (instrument_id,),
+    ).fetchall()
+    if not rows:
+        return None
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r["ex_date"], []).append(
+            {"action_type": r["action_type"], "value_or_ratio": float(r["value_or_ratio"])}
+        )
+    return out
+
+
+def load_membership_map(conn, index_name: str) -> dict[int, list[tuple]]:
+    """Point-in-time membership ranges per instrument_id for one index.
+
+    Each value is a list of (date_from, date_to) Timestamp tuples; date_to is
+    None while the instrument is still a member.
+    """
+    rows = conn.execute(
+        "SELECT instrument_id, date_from, date_to FROM index_membership"
+        " WHERE index_name = ?",
+        (index_name.lower(),),
+    ).fetchall()
+    out: dict[int, list[tuple]] = {}
+    for r in rows:
+        out.setdefault(int(r["instrument_id"]), []).append((
+            pd.to_datetime(r["date_from"]),
+            pd.to_datetime(r["date_to"]) if r["date_to"] else None,
+        ))
+    return out
+
+
+def _member_on(ranges: list[tuple] | None, day: pd.Timestamp) -> bool:
+    if not ranges:
+        return False
+    for date_from, date_to in ranges:
+        if day >= date_from and (date_to is None or day <= date_to):
+            return True
+    return False
 
 
 def _load_close_series(conn, ticker: str) -> pd.Series:
@@ -137,8 +193,15 @@ def run_backtest(
     *,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
+    membership: dict[int, list[tuple]] | None = None,
 ) -> BacktestResult:
-    """Run the event-driven simulation over [start, end] (OOS window)."""
+    """Run the event-driven simulation over [start, end] (OOS window).
+
+    `membership` (optional): point-in-time index membership ranges per
+    instrument_id (see load_membership_map). When given, NEW entries are only
+    evaluated for instruments that are members as of T; exits on held
+    positions always run so a removed member can still be sold.
+    """
     seed = int(bt_cfg.get("seed", 42))
     random.seed(seed)
     np.random.seed(seed)  # determinism guard (no randomness is used, but pinned anyway)
@@ -146,6 +209,11 @@ def run_backtest(
     costs = bt_cfg["costs"]
     risk_cfg = strategy_cfg["risk"]
     lag = int(bt_cfg.get("execution", {}).get("signal_to_fill_lag_days", 1))
+    if lag < 1:
+        raise ValueError(
+            "execution.signal_to_fill_lag_days must be >= 1: a same-bar fill "
+            "would execute at prices already used to generate the signal"
+        )
     atr_mult = float(risk_cfg["atr_mult_stop"])
 
     calendar = _trading_calendar(instruments)
@@ -163,16 +231,55 @@ def run_backtest(
     # equity records carry the full money breakdown for the audit trail.
     equity_records: list[tuple[pd.Timestamp, float, float, float]] = []
     decisions_log: list[dict] = []
+    fill_anomalies: list[dict] = []
 
     inst_by_ticker = {i.ticker: i for i in instruments}
 
     for di, day in enumerate(calendar):
+        # --- 0. corporate actions effective today (ex-date, before the open) ---
+        # A gap explained by a split/dividend/rights issue is NOT a market move:
+        # held positions and in-flight orders are re-based so the ATR stop and
+        # the accounting see continuous economics, not the mechanical gap.
+        # Ex-dates recorded on non-session days (weekend/holiday data entry)
+        # bridge forward to the next simulated bar via the (prev_day, day] window.
+        prev_day = calendar[di - 1] if di > 0 else None
+        for tk, pos in list(positions.items()):
+            inst = inst_by_ticker[tk]
+            actions = _actions_in_window(inst, prev_day, day)
+            if not actions:
+                continue
+            prev_close = _close_before(inst, day)
+            for action in actions:
+                cash += _apply_corporate_action(pos, action, prev_close)
+            if pos.qty <= 0:
+                # consolidated below one share: full cash-in-lieu exit above
+                del positions[tk]
+        for order in pending_orders:
+            inst = inst_by_ticker.get(order["ticker"])
+            if inst is None:
+                continue
+            for action in _actions_in_window(inst, prev_day, day):
+                _apply_action_to_order(order, action)
+
         # --- 1. execute pending orders scheduled for today (next-bar fills) ---
         # Cash is mutated ATOMICALLY here (before mark-to-market), so the equity
         # recorded this bar correctly reflects today's buys/sells.
         still_pending = []
         for order in pending_orders:
             if order["fill_on_index"] == di:
+                inst_o = inst_by_ticker[order["ticker"]]
+                if _open_on(inst_o, day) is None:
+                    # Fill-bar audit: the open is the contract; falling back to
+                    # the fill bar's close (or lapsing) must leave a trace.
+                    # "close_reference" describes the price source only -- the
+                    # order may still fill partially or not at all (volume cap).
+                    fill_anomalies.append({
+                        "type": ("order_lapsed_no_bar" if _close_on(inst_o, day) is None
+                                 else "open_missing_close_reference"),
+                        "ticker": order["ticker"], "side": order["side"],
+                        "decision_date": order["decision_date"],
+                        "fill_date": day.date().isoformat(),
+                    })
                 cash_delta, buy_notional, unfilled_sell_qty = _execute_order(
                     order, day, inst_by_ticker, costs, positions, trade_pnls,
                     decisions_log,
@@ -246,18 +353,27 @@ def run_backtest(
         for inst in instruments:
             if not _alive(inst, day):
                 continue
+            # Point-in-time universe: non-members as of T are not candidates for
+            # NEW entries; held positions keep evaluating so exits still fire.
+            if (membership is not None
+                    and inst.ticker not in positions
+                    and not _member_on(membership.get(inst.instrument_id), day)):
+                continue
             snap = compute.features_at(inst.features, day.date().isoformat())
             if snap is None:
                 continue
             close = snap.get("close")
             if close is None:
                 continue
-            # Inject the point-in-time LLM score (only data with date <= T) as a
-            # plain feature. It feeds the YAML rule like any other feature; sizing
-            # and risk remain deterministic (CLAUDE.md rule 1).
-            llm_score = _llm_score_on(inst, day)
+            # Inject the point-in-time LLM features (only data with date <= T) as
+            # plain features. They feed the YAML rules like any other feature;
+            # sizing and risk remain deterministic (CLAUDE.md rule 1).
+            llm_score = _series_asof(inst.llm_scores, day)
             if llm_score is not None:
                 snap["llm_score"] = llm_score
+            llm_relevance = _series_asof(inst.llm_relevance, day)
+            if llm_relevance is not None:
+                snap["llm_relevance"] = llm_relevance
 
             in_pos = inst.ticker in positions
             has_pending_buy = inst.ticker in pending_buys
@@ -358,6 +474,7 @@ def run_backtest(
         decisions=decisions_log,
         cash_curve=cash_series,
         exposure_curve=exposure_series,
+        fill_anomalies=fill_anomalies,
     )
 
 
@@ -365,19 +482,24 @@ def run_backtest(
 
 def _close_on(inst: Instrument, day: pd.Timestamp):
     if day in inst.prices.index:
-        return float(inst.prices.at[day, "close"])
+        val = inst.prices.at[day, "close"]
+        # NULL columns surface as NaN; a NaN reference price must never reach
+        # the fill model (it would fill at NaN and poison cash/equity).
+        return None if pd.isna(val) else float(val)
     return None
 
 
 def _open_on(inst: Instrument, day: pd.Timestamp):
     if day in inst.prices.index:
-        return float(inst.prices.at[day, "open"])
+        val = inst.prices.at[day, "open"]
+        return None if pd.isna(val) else float(val)
     return None
 
 
 def _volume_on(inst: Instrument, day: pd.Timestamp) -> float:
     if day in inst.prices.index:
-        return float(inst.prices.at[day, "volume"])
+        val = inst.prices.at[day, "volume"]
+        return 0.0 if pd.isna(val) else float(val)
     return 0.0
 
 
@@ -388,29 +510,125 @@ def _feature_on(inst: Instrument, day: pd.Timestamp, name: str):
     return None
 
 
-def _llm_score_on(inst: Instrument, day: pd.Timestamp):
-    """Point-in-time LLM score: the last score with date <= `day`, or None.
+def _actions_in_window(inst: Instrument, prev_day: pd.Timestamp | None,
+                       day: pd.Timestamp) -> list[dict]:
+    """Actions with ex_date in (prev_day, day] -- ISO string comparison.
 
-    No look-ahead: a score materialized for a later date is never visible at T.
+    Bridges ex-dates recorded on non-session days (weekend/holiday, or a day
+    this instrument printed no bar) to the next simulated bar instead of
+    silently skipping them. On the first calendar day only an exact match
+    applies (there are no positions or orders to re-base yet anyway).
     """
-    scores = inst.llm_scores
-    if scores is None or scores.empty:
+    if not inst.actions:
+        return []
+    day_iso = day.date().isoformat()
+    if prev_day is None:
+        entries = inst.actions.get(day_iso, [])
+        return list(entries)
+    prev_iso = prev_day.date().isoformat()
+    out: list[dict] = []
+    for ex_date in sorted(inst.actions):
+        if prev_iso < ex_date <= day_iso:
+            out.extend(inst.actions[ex_date])
+    return out
+
+
+def _close_before(inst: Instrument, day: pd.Timestamp):
+    """Last non-NaN close strictly before `day` (the cum price), or None."""
+    idx = inst.prices.index
+    prior = idx[idx < day]
+    if len(prior) == 0:
         return None
-    eligible = scores.loc[scores.index <= day]
+    val = inst.prices.at[prior[-1], "close"]
+    return None if pd.isna(val) else float(val)
+
+
+def _apply_corporate_action(pos: Position, action: dict, prev_close: float | None) -> float:
+    """Re-base a held position for an ex-date action. Returns the cash delta.
+
+    split (r new per old): qty scaled with FLOOR; the fractional remainder is
+        paid out as cash-in-lieu at the theoretical post-split price
+        (prev_close / r), so equity is conserved exactly and a reverse split
+        can never conjure or destroy value. A position consolidated below one
+        share ends with qty 0 -- the caller removes it (full cash-in-lieu).
+    dividend (D per share): cash credit qty*D on ex-date (paper simplification:
+        payment date = ex-date); stop AND entry price shielded by the
+        mechanical -D gap so per-trade PnL stays total-return-consistent.
+    rights_issue (factor f): stop shielded by the theoretical ex-rights factor;
+        entry price is NOT adjusted, so the drop shows as (conservative) PnL --
+        the value of the rights themselves is not modeled.
+    """
+    kind = action["action_type"]
+    value = float(action["value_or_ratio"])
+    if kind == "split":
+        exact = pos.qty * value
+        new_qty = int(exact + 1e-9)  # floor, guarded against float wobble
+        remainder = max(0.0, exact - new_qty)
+        cash_delta = 0.0
+        if remainder > 0 and prev_close and prev_close > 0:
+            cash_delta = remainder * (prev_close / value)  # post-split price
+        pos.qty = new_qty
+        pos.entry_price /= value
+        pos.stop_price /= value
+        return cash_delta
+    if kind == "dividend":
+        cash_delta = pos.qty * value
+        pos.stop_price = max(0.0, pos.stop_price - value)
+        pos.entry_price = max(0.0, pos.entry_price - value)
+        return cash_delta
+    if kind == "rights_issue":
+        pos.stop_price *= value
+        return 0.0
+    raise ValueError(f"unknown corporate action type: {kind}")
+
+
+def _apply_action_to_order(order: dict, action: dict) -> None:
+    """Re-base an in-flight order for an ex-date action.
+
+    Both sides scale their share count on a split: a BUY queued at cum prices
+    would otherwise fill its old share count at post-split prices (a reverse
+    split would silently buy r-times the intended notional on margin that does
+    not exist); a SELL's share count follows the re-based position. Stops
+    (computed from cum prices) are re-based for the same reason.
+    """
+    kind = action["action_type"]
+    value = float(action["value_or_ratio"])
+    if kind == "split":
+        order["qty"] = max(0, int(order["qty"] * value + 1e-9))
+        if order.get("stop_price") is not None:
+            order["stop_price"] /= value
+    elif kind == "dividend":
+        if order.get("stop_price") is not None:
+            order["stop_price"] = max(0.0, order["stop_price"] - value)
+    elif kind == "rights_issue":
+        if order.get("stop_price") is not None:
+            order["stop_price"] *= value
+
+
+def _series_asof(series: pd.Series | None, day: pd.Timestamp):
+    """Point-in-time read: the last value with date <= `day`, or None.
+
+    No look-ahead: a value materialized for a later date is never visible at T.
+    """
+    if series is None or series.empty:
+        return None
+    eligible = series.loc[series.index <= day]
     if eligible.empty:
         return None
     val = eligible.iloc[-1]
     return None if pd.isna(val) else float(val)
 
 
-def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
-    """True if any condition in the strategy config references the `llm_score`
-    feature. Used to decide whether to attach materialized LLM scores before a
-    plain backtest (so an LLM strategy is not silently starved of its gate).
+def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
+    """True if any condition references an `llm_*` feature (llm_score,
+    llm_relevance, ...). Used to decide whether to attach materialized LLM
+    features before a backtest (so an LLM strategy is not silently starved of
+    its gate).
     """
     def _walk(node) -> bool:
         if isinstance(node, dict):
-            if node.get("feature") == "llm_score":
+            feature = node.get("feature")
+            if isinstance(feature, str) and feature.startswith("llm_"):
                 return True
             return any(_walk(v) for v in node.values())
         if isinstance(node, (list, tuple)):
@@ -418,6 +636,14 @@ def strategy_uses_llm_score(strategy_cfg: dict) -> bool:
         return False
 
     return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+
+
+# Backwards-compatible aliases (pre-Pack-D names).
+strategy_uses_llm_score = strategy_uses_llm_features
+
+
+def _llm_score_on(inst: Instrument, day: pd.Timestamp):
+    return _series_asof(inst.llm_scores, day)
 
 
 def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
@@ -429,12 +655,14 @@ def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
     out: list[Instrument] = []
     for inst in instruments:
         scores = pipeline.load_llm_scores(conn, inst.instrument_id)
+        relevance = pipeline.load_llm_relevance(conn, inst.instrument_id)
         out.append(
             Instrument(
                 instrument_id=inst.instrument_id, ticker=inst.ticker,
                 sector=inst.sector, listed_from=inst.listed_from,
                 delisted_on=inst.delisted_on, prices=inst.prices,
                 features=inst.features, llm_scores=scores,
+                llm_relevance=relevance, actions=inst.actions,
             )
         )
     return out
@@ -520,8 +748,16 @@ class WalkForwardWindow:
     oos_end: pd.Timestamp
 
 
-def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_months: int) -> list[WalkForwardWindow]:
-    """Roll [IS | OOS] windows across the calendar. OOS windows are contiguous."""
+def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_months: int,
+                              embargo_sessions: int = 0) -> list[WalkForwardWindow]:
+    """Roll [IS | embargo | OOS] windows across the calendar.
+
+    `embargo_sessions` purges a gap of that many TRADING SESSIONS between the
+    end of each in-sample window and the start of its out-of-sample window, so
+    a feature with a lookback of up to `embargo_sessions` computed anywhere in
+    the OOS window can never read in-sample data (set it >= the longest
+    feature lookback — 252 sessions for ret_12m). 0 = contiguous (legacy).
+    """
     if len(calendar) == 0:
         return []
     windows: list[WalkForwardWindow] = []
@@ -531,11 +767,14 @@ def make_walk_forward_windows(calendar: pd.DatetimeIndex, is_months: int, oos_mo
 
     is_start = calendar[0]
     while True:
-        is_end = is_start + is_delta          # = oos_start
-        oos_start = is_end
-        oos_end = oos_start + oos_delta
-        if oos_start > final:
+        is_end = is_start + is_delta
+        # embargo: OOS starts `embargo_sessions` trading sessions AFTER is_end
+        first_idx = int(calendar.searchsorted(is_end))  # first session >= is_end
+        oos_idx = first_idx + int(embargo_sessions)
+        if oos_idx >= len(calendar):
             break
+        oos_start = calendar[oos_idx]
+        oos_end = oos_start + oos_delta
         windows.append(WalkForwardWindow(is_start, is_end, oos_start, min(oos_end, final)))
         if oos_end >= final:
             break
@@ -549,6 +788,8 @@ def run_walk_forward(
     benchmark_close: pd.Series,
     strategy_cfg: dict,
     bt_cfg: dict,
+    *,
+    membership: dict[int, list[tuple]] | None = None,
 ) -> BacktestResult:
     """Walk-forward OOS evaluation as ONE continuous simulation.
 
@@ -565,15 +806,25 @@ def run_walk_forward(
     """
     calendar = _trading_calendar(instruments)
     wf = bt_cfg["walk_forward"]
-    windows = make_walk_forward_windows(calendar, wf["in_sample_months"], wf["out_sample_months"])
+    windows = make_walk_forward_windows(
+        calendar, wf["in_sample_months"], wf["out_sample_months"],
+        embargo_sessions=int(wf.get("embargo_sessions", 0)),
+    )
 
     if not windows:
-        # not enough history for a full IS+OOS split -> single OOS pass
-        return run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg)
+        # Not enough history for IS + embargo + OOS -> single full-span pass.
+        # This is NOT out-of-sample; flag it so reports and the trials registry
+        # cannot silently present full-history metrics as OOS evidence.
+        result = run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg,
+                              membership=membership)
+        result.metrics["walk_forward_windows"] = 0
+        return result
 
     oos_start = windows[0].oos_start
     oos_end = windows[-1].oos_end
-    return run_backtest(
+    result = run_backtest(
         instruments, benchmark_close, strategy_cfg, bt_cfg,
-        start=oos_start, end=oos_end,
+        start=oos_start, end=oos_end, membership=membership,
     )
+    result.metrics["walk_forward_windows"] = len(windows)
+    return result

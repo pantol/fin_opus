@@ -99,6 +99,58 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     PRIMARY KEY (user_id, date)
 );
 
+-- Point-in-time index membership (e.g. WIG20 revisions). The backtest universe
+-- for date T = members as of T — former members stay so history is unbiased.
+CREATE TABLE IF NOT EXISTS index_membership (
+    index_name    TEXT NOT NULL,
+    instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+    date_from     TEXT NOT NULL,   -- first session of membership (ISO)
+    date_to       TEXT,            -- last session of membership (ISO), NULL = current member
+    source        TEXT,
+    PRIMARY KEY (index_name, instrument_id, date_from)
+);
+CREATE INDEX IF NOT EXISTS idx_index_membership ON index_membership(index_name, date_from);
+
+-- Corporate actions keyed by ex-date. Used to (a) derive the adjusted price
+-- series and (b) shield stops: a gap explained by an action is not a market move.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    instrument_id  INTEGER NOT NULL REFERENCES instruments(id),
+    action_type    TEXT NOT NULL CHECK (action_type IN ('dividend', 'split', 'rights_issue')),
+    ex_date        TEXT NOT NULL,   -- first session the price trades ex (ISO)
+    value_or_ratio REAL NOT NULL,   -- dividend: PLN/share; split: new shares per old; rights_issue: price factor
+    source         TEXT,
+    PRIMARY KEY (instrument_id, action_type, ex_date)
+);
+CREATE INDEX IF NOT EXISTS idx_corporate_actions_ex ON corporate_actions(instrument_id, ex_date);
+
+-- Trials registry (anti-luck): EVERY strategy/parameter set ever backtested
+-- is one trial. The Deflated Sharpe Ratio uses the number of distinct trials
+-- and the variance of their Sharpes — without this log, every reported Sharpe
+-- silently benefits from multiple testing.
+CREATE TABLE IF NOT EXISTS strategy_trials (
+    id               INTEGER PRIMARY KEY,
+    config_hash      TEXT NOT NULL,     -- sha256 over strategy + backtest knobs
+    strategy_name    TEXT NOT NULL,
+    strategy_version INTEGER NOT NULL,
+    run_at           TEXT NOT NULL,     -- ISO datetime, UTC
+    oos_start        TEXT,
+    oos_end          TEXT,
+    metrics_json     TEXT NOT NULL      -- includes sharpe_pp (per-period Sharpe)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_trials_hash ON strategy_trials(config_hash);
+
+-- Append-only journal of manual deviations from system signals. Rows are only
+-- ever inserted (no UPDATE/DELETE path exists in code).
+CREATE TABLE IF NOT EXISTS overrides (
+    id           INTEGER PRIMARY KEY,
+    user_id      TEXT NOT NULL,
+    timestamp    TEXT NOT NULL,     -- ISO datetime, UTC
+    decision_id  INTEGER REFERENCES decisions(id),
+    action_taken TEXT NOT NULL,
+    reason       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_overrides_user ON overrides(user_id, timestamp);
+
 -- ---------------------------------------------------------------------------
 -- Phase 2: LLM FEATURES layer. The LLM is ALWAYS only an INPUT to the
 -- deterministic risk layer (CLAUDE.md rule 1). Nothing here computes money.
@@ -145,18 +197,46 @@ CREATE TABLE IF NOT EXISTS llm_cache (
 );
 
 -- Materialized point-in-time LLM features per (instrument, as_of_date). The
--- backtest reads these deterministically; llm_score is the ONLY value injected
--- into the strategy feature snapshot.
+-- backtest reads these deterministically; llm_score and the numeric encoding
+-- of relevance are the only values injected into the strategy snapshot.
 CREATE TABLE IF NOT EXISTS llm_features (
     instrument_id INTEGER NOT NULL REFERENCES instruments(id),
     as_of_date    TEXT NOT NULL,    -- decision date the feature is valid for
     llm_score     REAL,             -- [-1, 1], derived from synthesis verdict/conviction
+    relevance     TEXT,             -- relevant_interesting / relevant_uninteresting / irrelevant
     research_json TEXT,
     synthesis_json TEXT,
     created_at    TEXT NOT NULL,
     PRIMARY KEY (instrument_id, as_of_date)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_features_asof ON llm_features(instrument_id, as_of_date);
+
+-- Per-call LLM cost ledger (tokens x per-model price from config/llm.yaml).
+-- The monthly hard cap sums cost_usd over the current UTC calendar month;
+-- cache hits are free and never appear here.
+CREATE TABLE IF NOT EXISTS llm_costs (
+    id                INTEGER PRIMARY KEY,
+    llm_call_id       INTEGER REFERENCES llm_calls(id),
+    created_at        TEXT NOT NULL,
+    role              TEXT NOT NULL,
+    model             TEXT NOT NULL,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    cost_usd          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_costs_created ON llm_costs(created_at);
+
+-- One row per LLM pipeline run (make llm): ok, or degraded (budget exhausted
+-- mid-run -> baseline-only operation). Absence of features is distinguishable
+-- from a degraded run only through this table.
+CREATE TABLE IF NOT EXISTS llm_runs (
+    id               INTEGER PRIMARY KEY,
+    run_at           TEXT NOT NULL,     -- ISO datetime, UTC
+    as_of_date       TEXT NOT NULL,     -- decision date T the run materialized for
+    status           TEXT NOT NULL,     -- ok / degraded
+    detail           TEXT,
+    features_written INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -176,12 +256,17 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     Column migrations run BEFORE indexes that depend on added columns, so a
     pre-existing database (e.g. an `instruments` table without `isin`) upgrades
-    cleanly.
+    cleanly. Also ensures the collector-owned schema (filings/collector_health)
+    so every CLI command sees ONE complete database — the collector keeps its
+    own standalone ensure_schema path for VPS-only deployments.
     """
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_instruments_isin ON instruments(isin)")
     conn.commit()
+    from app.ingestion import filings_db  # local import: keep app.db import-light
+
+    filings_db.ensure_schema(conn)
 
 
 def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -199,3 +284,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     if not column_exists(conn, "instruments", "isin"):
         conn.execute("ALTER TABLE instruments ADD COLUMN isin TEXT")
+    if column_exists(conn, "llm_features", "llm_score") and not column_exists(
+            conn, "llm_features", "relevance"):
+        conn.execute("ALTER TABLE llm_features ADD COLUMN relevance TEXT")

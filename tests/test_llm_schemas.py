@@ -15,6 +15,7 @@ from app.llm.schemas import (
 def _research(**over):
     base = {
         "sentiment": 0.5,
+        "relevance": "relevant_interesting",
         "catalysts": ["new contract"],
         "risks": ["fx"],
         "event_type": "contract",

@@ -9,6 +9,7 @@ that appears verbatim in the source filing. If it does not, we LOWER confidence
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from app.llm.client import LLMClient
@@ -23,7 +24,32 @@ _SYSTEM = (
     "required schema. The evidence_quote MUST be copied verbatim from the filing."
 )
 
+# Stable user-prompt template. The prompt prefix stays deterministic for
+# provider caching; prompt_version() fingerprints BOTH parts so the eval
+# harness can tell which prompt generation produced a given score.
+# NOTE: changing this template (or _SYSTEM) invalidates the entire llm_cache
+# (input hashes change) — the next `make llm` re-spends on unprocessed filings.
+_USER_TEMPLATE = (
+    "Ticker: {ticker}\n"
+    "Filing text:\n\"\"\"\n{filing_text}\n\"\"\"\n\n"
+    "Return JSON with keys: sentiment (-1..1), relevance (exactly one of: "
+    "relevant_interesting | relevant_uninteresting | irrelevant — is this filing "
+    "materially tradable for the ticker, and is it new/surprising information), "
+    "catalysts (string[]), risks (string[]), event_type (string), "
+    "confidence (0..1), evidence_quote (a short verbatim quote from the filing)."
+)
+
 EVIDENCE_PENALTY = 0.5  # multiply confidence by this when the quote is unsupported
+
+
+def prompt_version() -> str:
+    """Content fingerprint of the CURRENT research prompt (system + template).
+
+    Stored with every eval run so a prompt/model change that regresses on the
+    golden set is attributable to the exact prompt generation that caused it.
+    """
+    blob = _SYSTEM + "\n---\n" + _USER_TEMPLATE
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def _normalize(text: str) -> str:
@@ -31,16 +57,10 @@ def _normalize(text: str) -> str:
 
 
 def build_messages(ticker: str, filing_text: str) -> list[dict]:
-    user = (
-        f"Ticker: {ticker}\n"
-        f"Filing text:\n\"\"\"\n{filing_text}\n\"\"\"\n\n"
-        "Return JSON with keys: sentiment (-1..1), catalysts (string[]), "
-        "risks (string[]), event_type (string), confidence (0..1), "
-        "evidence_quote (a short verbatim quote from the filing)."
-    )
     return [
         {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user},
+        {"role": "user",
+         "content": _USER_TEMPLATE.format(ticker=ticker, filing_text=filing_text)},
     ]
 
 

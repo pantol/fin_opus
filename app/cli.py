@@ -40,8 +40,8 @@ def cmd_ingest(args) -> int:
     else:  # gpw (default): official session archive + GPW Benchmark indices
         from app.ingestion import gpw_archive
 
-        today = datetime.now(ZoneInfo("Europe/Warsaw")).date()
-        end = date.fromisoformat(args.end) if args.end else today
+        end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
+            datetime.now(ZoneInfo("Europe/Warsaw")))
         if args.start:
             start = date.fromisoformat(args.start)
         else:
@@ -77,6 +77,20 @@ def cmd_ingest(args) -> int:
         return 2
     conn.close()
     return 0
+
+
+def _default_ingest_end(now_warsaw):
+    """Latest session date safe to ingest as FINAL EOD data.
+
+    GPW serves TODAY's archive file intraday with partial (still-changing)
+    bars; ingesting one as a final EOD bar breaks the point-in-time
+    convention (as_of_date = session date assumes the bar is closed). Today
+    only counts after the session is over (closing auction ends 17:05;
+    18:00 adds slack). An explicit --end overrides this guard.
+    """
+    from datetime import timedelta
+    today = now_warsaw.date()
+    return today if now_warsaw.hour >= 18 else today - timedelta(days=1)
 
 
 def cmd_features(args) -> int:
@@ -118,10 +132,10 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
-    # If the strategy gates on `llm_score`, attach point-in-time LLM features
-    # (materialized earlier; read deterministically, NO LLM call). Otherwise the
-    # gate would never see a score and silently block every entry.
-    if engine.strategy_uses_llm_score(strat):
+    # If the strategy gates on any llm_* feature, attach point-in-time LLM
+    # features (materialized earlier; read deterministically, NO LLM call).
+    # Otherwise the gate would never see a value and silently block every entry.
+    if engine.strategy_uses_llm_features(strat):
         instruments = engine.attach_llm_scores(conn, instruments)
         with_scores = sum(
             1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
@@ -129,13 +143,32 @@ def cmd_backtest(args) -> int:
         print(f"Strategy uses llm_score; attached LLM features for "
               f"{with_scores}/{len(instruments)} instruments.")
 
+    membership, membership_error = _load_membership(conn, bt_cfg)
+    if membership_error:
+        print(membership_error)
+        conn.close()
+        return 1
+
     print(f"Running walk-forward backtest on {len(instruments)} instruments "
           f"(strategy: {strat['name']} v{strat['version']})...")
-    result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg)
+    result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg,
+                                     membership=membership)
+    if result.fill_anomalies:
+        n_lapsed = sum(1 for a in result.fill_anomalies
+                       if a["type"] == "order_lapsed_no_bar")
+        print(f"Fill audit: {len(result.fill_anomalies) - n_lapsed} orders used a "
+              f"close reference (open missing), {n_lapsed} lapsed (fill bar missing).")
 
     _persist_results(conn, bt_cfg["user_id"], result, strategy_id=strategy_id,
                      params=strat)
+    if result.metrics.get("walk_forward_windows") == 0:
+        print("\nWARNING: not enough history for in-sample + embargo + OOS — "
+              "this is a FULL-SPAN run, NOT out-of-sample. Treat these metrics "
+              "as in-sample evidence only.")
     _print_metrics_table(result, bt_cfg["walk_forward"]["benchmark"])
+    validation_text, _dsr, _mc = _validate_run(conn, strat, bt_cfg, result,
+                                               instruments, membership)
+    print(validation_text)
     conn.close()
     return 0
 
@@ -178,9 +211,15 @@ def cmd_llm(args) -> int:
             conn.close()
             return 1
 
+    from datetime import timezone as _tz
+
+    from app.alerts import telegram
+    from app.llm.client import LLMBudgetExceededError
+
     print(f"Materializing LLM features as of {as_of} "
           f"(filings cutoff: end of day, Europe/Warsaw)...")
     n_features = n_nothing = 0
+    degraded_reason = None
     for entry in entries:
         ticker = entry["ticker"].lower()
         row = conn.execute(
@@ -200,10 +239,17 @@ def cmd_llm(args) -> int:
             if snap:
                 quant_score = snap.get("momentum_6m")
 
-        verdict = llm_pipeline.compute_feature_for_date(
-            conn, client, instrument_id=inst_id, ticker=ticker,
-            as_of_date=as_of, quant_score=quant_score,
-        )
+        try:
+            verdict = llm_pipeline.compute_feature_for_date(
+                conn, client, instrument_id=inst_id, ticker=ticker,
+                as_of_date=as_of, quant_score=quant_score,
+            )
+        except LLMBudgetExceededError as exc:
+            # Budget, not a bad filing: nothing was marked processed or attempt-
+            # bumped for the interrupted instrument — those filings simply wait.
+            degraded_reason = str(exc)
+            print(f"  {ticker:10s} STOPPED: {exc}")
+            break
         if verdict is None:
             n_nothing += 1  # no unprocessed filings, or rejected (logged)
         else:
@@ -211,9 +257,77 @@ def cmd_llm(args) -> int:
             print(f"  {ticker:10s} llm_score={verdict['llm_score']:+.3f} "
                   f"({verdict['verdict']}, conviction={verdict['conviction']:.2f})")
 
+    status = "degraded" if degraded_reason else "ok"
+    conn.execute(
+        "INSERT INTO llm_runs (run_at, as_of_date, status, detail, features_written)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (datetime.now(_tz.utc).isoformat(), as_of, status, degraded_reason,
+         n_features),
+    )
+    conn.commit()
+
     print(f"\nMaterialized {n_features} feature rows; "
           f"{n_nothing} instruments had nothing to process.")
+    if degraded_reason:
+        print("RUN DEGRADED: monthly LLM budget exhausted — the pipeline "
+              "continues WITHOUT new LLM features (baseline-only).")
+        telegram.send_text(
+            "⚠️ Budzet LLM wyczerpany\n"
+            f"Data decyzji: {as_of}\n"
+            "Pipeline dziala w trybie awaryjnym (bez nowych cech LLM).\n"
+            f"Szczegoly: {degraded_reason}"
+        )
     _print_llm_audit(conn)
+    conn.close()
+    return 3 if degraded_reason else 0
+
+
+def cmd_label(args) -> int:
+    """Interactive golden-set labeling of collected filings (ZERO LLM calls)."""
+    from app.llm import evalset
+
+    conn = connect(args.db)
+    init_db(conn)
+    user = args.user or cfg.load_backtest_config()["user_id"]
+    evalset.run_labeling(conn, user)
+    conn.close()
+    return 0
+
+
+def cmd_eval_llm(args) -> int:
+    """Prompt-regression harness: current research prompt vs the golden set."""
+    import os
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("ERROR: OPENROUTER_API_KEY is not set; cannot call OpenRouter.")
+        return 2
+
+    from app.llm import evalset
+    from app.llm.client import LLMBudgetExceededError, LLMClient
+
+    conn = connect(args.db)
+    init_db(conn)
+    client = LLMClient(conn, cfg.load_llm_config())
+    try:
+        report = evalset.run_eval(conn, client)
+    except LLMBudgetExceededError as exc:
+        print(f"STOPPED: {exc}")
+        conn.close()
+        return 3
+    if report is None:
+        print("No labeled filings yet — run `make label` first (target: 50-100).")
+        conn.close()
+        return 1
+    print(report.as_text())
+    prev = evalset.previous_run(conn, report.prompt_version, report.requested_model)
+    if prev:
+        delta = report.accuracy - prev["accuracy"]
+        print(f"\nvs previous config (prompt {prev['prompt_version']}, "
+              f"model {prev['requested_model']}): accuracy "
+              f"{prev['accuracy']:.3f} -> {report.accuracy:.3f} ({delta:+.3f})")
+        if delta < 0:
+            print("REGRESSION vs the previous configuration — do NOT ship this "
+                  "prompt/model change (README rule).")
     conn.close()
     return 0
 
@@ -235,6 +349,190 @@ def _print_llm_audit(conn, limit: int = 10) -> None:
               f"cached_tokens={r['cached_tokens']}")
 
 
+def _validate_run(conn, strategy_cfg, bt_cfg, result, instruments, membership,
+                  run_mc: bool = True):
+    """Anti-luck validation for one backtest result (Pack C).
+
+    Logs the run into the trials registry, computes the Deflated Sharpe Ratio
+    from the registry statistics, and (when run_mc) runs the random-entry
+    Monte Carlo benchmark. Returns (report_text, dsr_result, mc_result).
+    Deterministic.
+    """
+    from app.backtest import mc_benchmark, validation
+
+    eq = result.equity_curve
+    oos_start = eq.index[0].date().isoformat() if len(eq) else None
+    oos_end = eq.index[-1].date().isoformat() if len(eq) else None
+    metrics = dict(result.metrics)
+    metrics["sharpe_pp"] = validation.per_period_sharpe(eq)
+    validation.log_trial(
+        conn, cfg_hash=validation.config_hash(strategy_cfg, bt_cfg),
+        strategy_name=strategy_cfg["name"],
+        strategy_version=int(strategy_cfg["version"]),
+        oos_start=oos_start, oos_end=oos_end, metrics=metrics,
+    )
+    n_trials, var_pp = validation.trial_stats(conn)
+    dsr = validation.deflated_sharpe(eq, n_trials, var_pp)
+
+    v_cfg = bt_cfg.get("validation") or {}
+    mc = mc_benchmark.run_random_benchmark(
+        instruments, result, bt_cfg, strategy_cfg["risk"],
+        n_sims=int(v_cfg.get("mc_sims", 0)) if run_mc else 0,
+        seed=int(v_cfg.get("mc_seed", 4242)),
+        membership=membership,
+    )
+
+    lines = [
+        "",
+        "Validation (anti-luck):",
+        f"  trials to date        {dsr.n_trials} distinct config(s) ever backtested",
+        f"  raw sharpe (annual)   {result.metrics['sharpe']:.4f}",
+        f"  deflated sharpe DSR   {dsr.dsr:.4f}  "
+        f"[P(true Sharpe beats the expected max of {dsr.n_trials} luck trials); "
+        f"SR* = {dsr.sr_star:.5f}/period]",
+        mc.as_text(),
+    ]
+    return "\n".join(lines), dsr, mc
+
+
+def _load_membership(conn, bt_cfg):
+    """Resolve the optional point-in-time universe gate (universe.index).
+
+    Returns (membership_map | None, error_message | None). Used by BOTH
+    backtest and ab so the two always simulate the same universe.
+    """
+    index_name = (bt_cfg.get("universe") or {}).get("index")
+    if not index_name:
+        return None, None
+    membership = engine.load_membership_map(conn, index_name)
+    if not membership:
+        return None, (
+            f"ERROR: universe.index='{index_name}' is set but the "
+            f"index_membership table is empty. Run `python -m app.cli refdata` "
+            f"(and fill config/index_membership.yaml) first."
+        )
+    print(f"Point-in-time universe: '{index_name}' membership loaded for "
+          f"{len(membership)} instruments.")
+    return membership, None
+
+
+def cmd_refdata(args) -> int:
+    """Load index membership + corporate action fixtures; derive adjusted prices."""
+    from app.ingestion import refdata
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = refdata.load_refdata(
+        conn, cfg.load_index_membership(), cfg.load_corporate_actions()
+    )
+    print(f"Loaded {report.membership_rows} index membership rows and "
+          f"{report.action_rows} corporate actions.")
+    if report.adjusted_instruments:
+        print(f"Derived adjusted price series for {report.adjusted_instruments} "
+              f"instruments ({report.adjusted_bars} bars, adjusted=1; raw rows untouched).")
+    if report.failures:
+        print(f"\n{len(report.failures)} problem(s):")
+        for failure in report.failures:
+            print(f"  {failure}")
+        conn.close()
+        return 2
+    conn.close()
+    return 0
+
+
+def cmd_check_data(args) -> int:
+    """Data-quality report; sends a Telegram alert (dry-run without token) on issues."""
+    from app.alerts import telegram
+    from app.ingestion import quality
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = quality.run_checks(conn, cfg.load_universe(), cfg.load_data_quality())
+    print(quality.format_report(report))
+    conn.close()
+    if not report.ok:
+        telegram.send_text(quality.format_alert_pl(report))
+        return 2
+    return 0
+
+
+def cmd_override(args) -> int:
+    """Journal a manual deviation from a system signal (append-only)."""
+    from datetime import datetime, timezone
+
+    conn = connect(args.db)
+    init_db(conn)
+    user_id = args.user or cfg.load_backtest_config()["user_id"]
+    if args.decision_id is not None:
+        row = conn.execute(
+            "SELECT id FROM decisions WHERE id = ?", (args.decision_id,)
+        ).fetchone()
+        if row is None:
+            print(f"ERROR: decision {args.decision_id} does not exist.")
+            conn.close()
+            return 1
+    conn.execute(
+        "INSERT INTO overrides (user_id, timestamp, decision_id, action_taken, reason)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (user_id, datetime.now(timezone.utc).isoformat(), args.decision_id,
+         args.action, args.reason),
+    )
+    conn.commit()
+    ref = f" (decision {args.decision_id})" if args.decision_id is not None else ""
+    print(f"Override recorded for user '{user_id}'{ref}.")
+    conn.close()
+    return 0
+
+
+def cmd_backup(args) -> int:
+    """Snapshot the DB (VACUUM INTO), push to R2 when creds exist, prune old ones."""
+    from app import backup as bkp
+    from app.config import DEFAULT_DB_PATH
+
+    db_path = args.db or DEFAULT_DB_PATH
+    try:
+        report = bkp.run_backup(db_path, cfg.load_backup_config())
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}")
+        return 1
+    except RuntimeError as exc:  # boto3 missing while creds are set
+        print(f"ERROR: {exc}")
+        return 1
+    print(report.as_text())
+    return 0
+
+
+def cmd_restore_test(args) -> int:
+    """Verify the latest snapshot actually restores (integrity + row counts)."""
+    from app import backup as bkp
+    from app.config import DEFAULT_DB_PATH
+
+    try:
+        report = bkp.run_restore_test(args.db or DEFAULT_DB_PATH,
+                                      cfg.load_backup_config())
+    except RuntimeError as exc:  # partial creds / boto3 missing
+        print(f"ERROR: {exc}")
+        return 1
+    print(report.as_text())
+    return 0 if report.ok else 2
+
+
+def cmd_status(args) -> int:
+    """One-command deployment liveness check; alerts + non-zero exit when stale."""
+    from app import status as statusmod
+    from app.alerts import telegram
+
+    conn = connect(args.db)
+    init_db(conn)
+    report = statusmod.run_status(conn, cfg.load_backup_config())
+    conn.close()
+    print(report.as_text())
+    if not report.ok:
+        telegram.send_text(report.alert_pl())
+        return 2
+    return 0
+
+
 def cmd_ab(args) -> int:
     """Run the baseline vs baseline+LLM A/B comparison on the OOS window."""
     conn = connect(args.db)
@@ -249,9 +547,29 @@ def cmd_ab(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
+    membership, membership_error = _load_membership(conn, bt_cfg)
+    if membership_error:
+        print(membership_error)
+        conn.close()
+        return 1
+
     print(f"A/B: baseline='{baseline['name']}' vs llm='{llm['name']}' "
           f"on {len(instruments)} instruments (OOS, realistic costs)...")
-    report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg)
+    report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg,
+                               membership=membership)
+
+    # Anti-luck gates on the CANDIDATE (the LLM variant): the deltas gate alone
+    # cannot tell luck from edge (Pack C). Both trials land in the registry.
+    _validate_run(conn, baseline, bt_cfg, report.baseline_result, instruments,
+                  membership, run_mc=False)  # baseline: registry entry only
+    _, dsr, mc = _validate_run(conn, llm, bt_cfg, report.llm_result, instruments,
+                               membership)
+    gates = (bt_cfg.get("validation") or {}).get("gates") or {}
+    report = ab_harness.apply_validation_gates(
+        report, dsr=dsr.dsr,
+        sharpe_percentile=mc.percentiles.get("sharpe") if mc.n_sims else None,
+        gates=gates,
+    )
     print()
     print(report.as_text())
     conn.close()
@@ -328,6 +646,30 @@ def main(argv=None) -> int:
                      help="Decision date T (ISO; default: today in Europe/Warsaw)")
     llm.add_argument("--ticker", default=None,
                      help="Restrict to one ticker (default: all universe instruments)")
+    sub.add_parser("refdata",
+                   help="Load index membership + corporate actions fixtures; derive adjusted prices")
+    sub.add_parser("check-data",
+                   help="Data-quality report (missing sessions, volume, jumps, stale tickers)")
+    ov = sub.add_parser("override",
+                        help="Journal a manual deviation from a system signal (append-only)")
+    ov.add_argument("--decision-id", type=int, default=None,
+                    help="The decisions.id being overridden (optional)")
+    ov.add_argument("--action", required=True, help="What you actually did")
+    ov.add_argument("--reason", required=True, help="Why you deviated from the signal")
+    ov.add_argument("--user", default=None,
+                    help="user_id (default: backtest.yaml user_id)")
+    lbl = sub.add_parser("label",
+                         help="Label filings for the golden eval set (interactive, no LLM)")
+    lbl.add_argument("--user", default=None,
+                     help="labeled_by (default: backtest.yaml user_id)")
+    sub.add_parser("eval-llm",
+                   help="Prompt-regression eval: current research prompt vs the golden set")
+    sub.add_parser("backup",
+                   help="Online DB snapshot (VACUUM INTO) + R2 upload + retention")
+    sub.add_parser("restore-test",
+                   help="Pull the latest snapshot and verify it restores")
+    sub.add_parser("status",
+                   help="Deployment liveness: prices, collector, filings, backups")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -340,6 +682,22 @@ def main(argv=None) -> int:
         return cmd_ab(args)
     if args.command == "llm":
         return cmd_llm(args)
+    if args.command == "refdata":
+        return cmd_refdata(args)
+    if args.command == "check-data":
+        return cmd_check_data(args)
+    if args.command == "override":
+        return cmd_override(args)
+    if args.command == "label":
+        return cmd_label(args)
+    if args.command == "eval-llm":
+        return cmd_eval_llm(args)
+    if args.command == "backup":
+        return cmd_backup(args)
+    if args.command == "restore-test":
+        return cmd_restore_test(args)
+    if args.command == "status":
+        return cmd_status(args)
     return 1
 
 

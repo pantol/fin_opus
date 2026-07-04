@@ -1,0 +1,30 @@
+# Point-in-time index membership (loaded into the index_membership table by
+# `python -m app.cli refdata`). The backtest universe for date T = members as
+# of T, so revisions must carry the REAL effective dates from GPW announcements
+# (annual/quarterly reviews), not today's composition.
+#
+# This file is AUTHORITATIVE: reloading replaces each listed index's rows
+# wholesale, so corrections and deletions here actually take effect in the DB.
+#
+# PLACEHOLDERS: date_from values below mark each ticker's earliest bar in the
+# current dataset, NOT real revision dates. Replace them with actual dates from
+# GPW index committee announcements before gating a backtest on membership.
+#
+# Fields per entry:
+#   ticker     — must exist in the instruments table (lowercase, as in universe.yaml)
+#   date_from  — first session of membership (ISO)
+#   date_to    — last session of membership (ISO); omit while still a member
+#   source     — where the dates come from (announcement URL / "placeholder")
+
+indices:
+  wig20:
+    - {ticker: pkn, date_from: 2015-01-02, source: placeholder}
+    - {ticker: pko, date_from: 2015-01-02, source: placeholder}
+    - {ticker: pzu, date_from: 2015-01-02, source: placeholder}
+    - {ticker: peo, date_from: 2015-01-02, source: placeholder}
+    - {ticker: kgh, date_from: 2015-01-02, source: placeholder}
+    - {ticker: cdr, date_from: 2015-01-02, source: placeholder}
+    - {ticker: lpp, date_from: 2015-01-02, source: placeholder}
+    # Delisted former members must STAY here with their real date ranges —
+    # removing them reintroduces survivorship bias.
+    - {ticker: gnb, date_from: 2015-01-02, date_to: 2019-03-15, source: placeholder}

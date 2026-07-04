@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status label eval-llm clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -27,6 +27,16 @@ backfill:
 features:
 	$(PYTHON) -m app.cli features
 
+# Load index membership + corporate action fixtures (config/*.yaml) and derive
+# the adjusted price series for instruments that have actions.
+refdata:
+	$(PYTHON) -m app.cli refdata
+
+# Data-quality report: missing sessions, zero/negative volume, unexplained
+# price jumps, stale tickers. Telegram alert on issues (dry-run without token).
+check-data:
+	$(PYTHON) -m app.cli check-data
+
 # Full chain: ingest (live Stooq) -> features -> walk-forward backtest -> metrics.
 backtest: ingest
 	$(PYTHON) -m app.cli backtest
@@ -49,6 +59,16 @@ ab-offline: ingest-offline
 llm:
 	$(PYTHON) -m app.cli llm
 
+# Label collected filings for the golden eval set (interactive; ZERO LLM).
+label:
+	$(PYTHON) -m app.cli label
+
+# Prompt-regression harness: run the CURRENT research prompt against the
+# golden set; accuracy + per-class F1 vs your labels, history in eval_runs.
+# README rule: no prompt/model change ships if it regresses here.
+eval-llm:
+	$(PYTHON) -m app.cli eval-llm
+
 # ESPI/EBI + news collector (standalone, ZERO LLM). One-shot cycle.
 collect:
 	$(PYTHON) -m app.ingestion.collect_news
@@ -56,6 +76,21 @@ collect:
 # Same collector, but run forever on the configured schedule (VPS daemon).
 collect-loop:
 	$(PYTHON) -m app.ingestion.collect_news --loop
+
+# Online DB snapshot (VACUUM INTO — never a live-file copy), push to R2 when
+# R2_* env credentials exist, apply retention (config/backup.yaml).
+backup:
+	$(PYTHON) -m app.cli backup
+
+# A backup that was never restored is not a backup: pull the latest snapshot,
+# integrity-check it, compare row counts vs the live DB. Run monthly.
+restore-test:
+	$(PYTHON) -m app.cli restore-test
+
+# One command to verify everything is alive: prices, collector heartbeat,
+# filings backlog, newest backup. Non-zero exit + Telegram alert when stale.
+status:
+	$(PYTHON) -m app.cli status
 
 clean:
 	rm -f data/*.db

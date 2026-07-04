@@ -15,6 +15,26 @@ walk_forward:
   in_sample_months: 24
   out_sample_months: 6
   benchmark: wig20tr            # never SPY
+  # Purged gap between each train window and its test window, in TRADING
+  # SESSIONS. Must be >= the longest feature lookback (252 = ret_12m) so no
+  # information leaks across the split.
+  embargo_sessions: 252
+
+# Anti-luck validation (Pack C). All deterministic code.
+validation:
+  mc_sims: 1000                 # random-entry Monte Carlo benchmark runs (0 = skip)
+  mc_seed: 4242
+  gates:
+    # Acceptance requires BOTH the OOS-improvement gate AND these thresholds.
+    min_dsr: 0.95               # Deflated Sharpe Ratio (probability) floor
+    min_random_percentile: 0.95 # strategy Sharpe percentile vs cost-matched randomness
+
+# Optional point-in-time universe gate. When `index` names an index (e.g.
+# wig20), NEW entries are only evaluated for instruments that are members as
+# of T per the index_membership table (`python -m app.cli refdata` loads it).
+# null = trade the full universe.yaml list (default; membership not consulted).
+universe:
+  index: null
 
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)

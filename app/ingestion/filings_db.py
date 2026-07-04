@@ -52,6 +52,32 @@ CREATE TABLE IF NOT EXISTS collector_health (
     last_cycle_new_items INTEGER,
     last_error           TEXT
 );
+
+-- Golden evaluation set (Pack D): human relevance labels over collected
+-- filings. One label per filing (relabeling upserts); joined against eval
+-- predictions (and later trade outcomes).
+CREATE TABLE IF NOT EXISTS eval_labels (
+    filing_id  INTEGER PRIMARY KEY,
+    label      TEXT NOT NULL CHECK (label IN
+                  ('relevant_interesting', 'relevant_uninteresting', 'irrelevant')),
+    labeled_by TEXT NOT NULL,
+    labeled_at TEXT NOT NULL,      -- ISO datetime, UTC
+    notes      TEXT
+);
+
+-- Prompt-regression history: one row per `make eval-llm` run. README rule:
+-- no prompt/model change ships if it regresses on the golden set.
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id              INTEGER PRIMARY KEY,
+    created_at      TEXT NOT NULL,
+    prompt_version  TEXT NOT NULL,     -- research prompt content fingerprint
+    requested_model TEXT NOT NULL,
+    served_provider TEXT,
+    n_labels        INTEGER NOT NULL,
+    n_rejected      INTEGER NOT NULL DEFAULT 0,
+    accuracy        REAL NOT NULL,
+    f1_json         TEXT NOT NULL      -- per-class F1 (JSON object)
+);
 """
 
 

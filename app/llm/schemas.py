@@ -15,11 +15,17 @@ import json
 
 from jsonschema import Draft7Validator
 
+# Discrete relevance labels — shared by the research schema, the labeling CLI
+# (golden set), and the eval harness, so predictions and human labels are
+# always drawn from the same closed set.
+RELEVANCE_LABELS = ("relevant_interesting", "relevant_uninteresting", "irrelevant")
+
 RESEARCH_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "sentiment",
+        "relevance",
         "catalysts",
         "risks",
         "event_type",
@@ -28,6 +34,7 @@ RESEARCH_SCHEMA = {
     ],
     "properties": {
         "sentiment": {"type": "number", "minimum": -1, "maximum": 1},
+        "relevance": {"type": "string", "enum": list(RELEVANCE_LABELS)},
         "catalysts": {"type": "array", "items": {"type": "string"}},
         "risks": {"type": "array", "items": {"type": "string"}},
         "event_type": {"type": "string"},

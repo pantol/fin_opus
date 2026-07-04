@@ -1,0 +1,22 @@
+# Corporate actions (loaded into the corporate_actions table by
+# `python -m app.cli refdata`). Keyed by EX-DATE — the first session the price
+# trades without the right. Used to derive the adjusted price series and to
+# shield ATR stops from gaps that are not market moves.
+#
+# This file is the SINGLE source of record: reloading replaces the table
+# contents wholesale, so corrections and deletions here actually take effect.
+# An ex-date recorded on a non-session day is bridged to the next session by
+# the engine, but prefer the real ex session date.
+#
+# PLACEHOLDERS: the entries below are examples only (commented out). Fill in
+# real dividends/splits from issuer announcements (ESPI) or stooq/GPW records.
+#
+# action_type semantics for value_or_ratio:
+#   dividend      — gross dividend in PLN per share (price gaps DOWN by ~this)
+#   split         — new shares per old share (5 means 5-for-1; price divides by 5)
+#   rights_issue  — theoretical ex-rights price factor in (0, 1]
+#                   (ex price ≈ cum price * factor)
+
+actions: []
+  # - {ticker: pkn, action_type: dividend, ex_date: 2024-06-10, value_or_ratio: 4.15, source: "ESPI 12/2024"}
+  # - {ticker: cdr, action_type: split, ex_date: 2016-07-20, value_or_ratio: 2.0, source: "placeholder"}

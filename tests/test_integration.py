@@ -103,7 +103,10 @@ def test_walk_forward_windows_roll_forward():
     windows = engine.make_walk_forward_windows(cal, is_months=24, oos_months=6)
     assert len(windows) >= 2
     for w in windows:
-        assert w.is_start < w.is_end == w.oos_start < w.oos_end
+        # with embargo_sessions=0 the OOS starts at the first real SESSION on
+        # or after is_end (is_end itself may fall on a weekend/holiday)
+        assert w.is_start < w.is_end <= w.oos_start < w.oos_end
+        assert w.oos_start == cal[cal.searchsorted(w.is_end)]
     # OOS segments advance in time
     for a, b in zip(windows, windows[1:]):
         assert b.oos_start > a.oos_start

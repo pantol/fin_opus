@@ -40,7 +40,8 @@ def _client(conn, research_content, synthesis_content):
 
 def _research_json():
     return json.dumps({
-        "sentiment": 0.7, "catalysts": ["contract"], "risks": [],
+        "sentiment": 0.7, "relevance": "relevant_interesting",
+        "catalysts": ["contract"], "risks": [],
         "event_type": "contract", "confidence": 0.9,
         "evidence_quote": "signed a contract",
     })

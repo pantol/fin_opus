@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 242 passing.
+ZERO LLM in the money path. **Tests:** 246 passing.
 
 ---
 
@@ -17,7 +17,7 @@ ZERO LLM in the money path. **Tests:** 242 passing.
 |-------|-------|--------|
 | 0 | Scaffold: `app/` package, config, db schema, Makefile, README | ✅ Done |
 | 1 | Data + features + 1 strategy + full risk + backtest + log + Telegram stub (no LLM) | ✅ Done |
-| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done (121 green); A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
+| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done; A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
 | 3 | Regime radar / turning points | ⬜ Not started |
 | 4 | Academic strategies (more YAML, same engine) | ⬜ Not started |
 | 5 | Survey / user profile | ⬜ Not started |
@@ -89,6 +89,23 @@ ZERO LLM in the money path. **Tests:** 242 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-05 — Onboarding + doc-accuracy pass (readiness audit fixes)
+No behavior change to the money/LLM path; a readiness audit found stale docs
+and two onboarding rough edges. Suite is **246 passing** (Pack D logged 242;
+the +4 came from the post-Pack-D review-fix commits `c351106`, which added
+trials-registry/MC tests without their own changelog entry — reconciled here).
+- **`.env` auto-load (zero-dep):** `app/cli.py` now loads a local `.env` at
+  startup (shell exports still win); `.env.example` was missing 5 of 8 vars —
+  now lists all (TELEGRAM_*, OPENROUTER_API_KEY, R2_*, HEALTHCHECK_URL_*).
+- **Collector-first hint:** `make llm` now prints a clear "run `make collect`
+  first (RSS has no backfill)" message when it finds an empty `filings` table,
+  instead of silently materializing zero features.
+- **Doc corrections:** README/PROGRESS test counts 173/242 → **246**; README
+  LLM gate corrected to `llm_score >= 0.0` (matches the shipped YAML); Telegram
+  "stub" language → "notifier" (the live-send path is real); README setup gains
+  a tested-Python-version note. Removed the resolved "GitHub push blocked" item
+  and the stale "Next up (Phase 2 — not started)" block below.
 
 ### 2026-07-04 — Pack D: LLM guardrails (golden eval set, relevance, spend cap)
 Evaluation + cost guardrails on the LLM features layer; 242 tests green (+14).
@@ -286,11 +303,13 @@ decision/trade/equity logging, Telegram dry-run stub, CLI, Makefile, README.
 
 ## Outstanding / blocked
 
-- [ ] **GitHub push** — blocked by environment network wall. Run from your own
-  terminal: `git push -u origin main` (remote: `https://github.com/pantol/fin_opus.git`).
+- _(none open)_ — `main` is pushed to `origin` and PRs #3/#4 are merged.
 
-## Next up (Phase 2 entry — not started)
+## Next up (Phase 3 — not started)
 
-- [ ] OpenRouter client (`app/llm/`), config in `config/llm.yaml`, pinned provider + logged generation id.
-- [ ] LLM outputs as validated JSON → *inputs* to the deterministic risk layer only.
-- [ ] Use the `llm-provider-routing` skill; cache by input hash; verify cached_tokens.
+- [ ] Regime radar / turning points: LLM as *features* feeding a deterministic
+  regime signal (still ZERO LLM in the money path). See README "Seams for later
+  phases".
+- [ ] Fill real fixtures for live use: `config/index_membership.yaml` (GPW WIG20
+  revision dates) and `config/corporate_actions.yaml` (dividends/splits/rights),
+  then decide on the adjusted-price feature switch.

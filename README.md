@@ -8,7 +8,7 @@ Implemented today:
 
 - **Phases 0+1** — real EOD data, point-in-time features, one YAML rule
   strategy, full deterministic risk layer, realistic walk-forward backtest,
-  decision logging, Telegram alert stub.
+  decision logging, Telegram notifier (dry-run by default).
 - **Phase 2 (LLM features)** — ESPI/EBI/news collector over live RSS feeds, an
   OpenRouter research→judge pipeline that materializes a point-in-time
   `llm_score` feature, and an A/B harness comparing baseline vs baseline+LLM.
@@ -19,16 +19,22 @@ Implemented today:
 
 ### 1. One-time setup
 
+Python 3.11–3.12 recommended (3.10+ supported). The compiled deps
+(`curl_cffi`, `xlrd`) need wheels for your interpreter, so a bleeding-edge or
+pre-3.10 Python may fail to install.
+
 ```bash
 make setup                      # create .venv and install dependencies
-cp .env.example .env            # then fill in the secrets you need:
+cp .env.example .env            # then fill in the secrets you need (all optional):
                                 #   OPENROUTER_API_KEY  - only for `make llm`
                                 #   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID - optional alerts
-make test                       # 173 tests: money math, point-in-time, fills, LLM contracts
+                                #   R2_* / HEALTHCHECK_URL_* - deployment (backups, health)
+make test                       # 246 tests: money math, point-in-time, fills, LLM contracts
 ```
 
-Environment variables are read from the shell environment — export them or use
-a tool like `direnv`; nothing auto-loads `.env`.
+The CLI auto-loads a local `.env` at startup; any variable already exported in
+your shell takes precedence over the file. You can still export vars manually
+or use a tool like `direnv`.
 
 ### 2. Get price data (GPW official archive)
 
@@ -116,6 +122,11 @@ make llm                                        # today's features for the whole
 python -m app.cli llm --date 2026-07-01         # a specific decision date
 python -m app.cli llm --ticker pko              # a single instrument
 ```
+
+**Needs filings first (step 4).** On a fresh clone there are none — RSS has no
+backfill — so `make llm` and `make ab` produce nothing until the collector has
+run for a while. Run `make collect-loop` and let it accumulate history first;
+`make llm` says so when it finds an empty `filings` table.
 
 For each instrument with unprocessed filings published up to the decision
 date (end-of-day Europe/Warsaw), the pipeline runs research → judge on the
@@ -226,7 +237,7 @@ app/
     evalset.py          # golden-set labeling CLI + prompt-regression harness
   logging/decisions.py  # persist decisions + feature snapshots + trades + equity
   alerts/
-    telegram.py         # alert stub (dry-run prints a Polish card if no token)
+    telegram.py         # notifier: real send with a token, else dry-run Polish card
     healthcheck.py      # dead-man's-switch pings (healthchecks.io-style)
   backup.py             # VACUUM INTO snapshots, R2 upload, retention, restore test
   status.py             # one-command deployment liveness (make status)
@@ -240,7 +251,7 @@ config/
   llm.yaml              # models, pinned providers, caching (Phase 2)
   news_sources.yaml     # live-verified RSS feeds + per-feed timezone quirks
   strategies/*.yaml     # one engine runs any strategy config
-tests/                  # 173 tests: features, point-in-time, risk, fills, metrics,
+tests/                  # 246 tests: features, point-in-time, risk, fills, metrics,
                         # collector, LLM contracts, A/B, reproducibility, e2e
 ```
 
@@ -301,7 +312,7 @@ tests/                  # 173 tests: features, point-in-time, risk, fills, metri
 Long when `close > SMA200` **and** 6-month momentum `> 0`; exit on an ATR
 trailing stop **or** a trend break (`close < SMA200`). All thresholds and risk
 parameters live in the YAML, not in code. `trend_momentum_llm.yaml` adds one
-condition — `llm_score >= 0.1` — as an entry gate.
+condition — `llm_score >= 0.0` (a non-negative score) — as an entry gate.
 
 ## Data notes
 

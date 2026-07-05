@@ -1,6 +1,7 @@
-"""Telegram alert stub.
+"""Telegram notifier (dry-run by default).
 
-If TELEGRAM_BOT_TOKEN is unset, runs in DRY-RUN mode and prints the alert card
+With TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID set it POSTs a real message to the
+Bot API; if either is unset it runs in DRY-RUN mode and prints the alert card
 to the console (no network). End-user strings are in Polish (per conventions);
 code/comments stay English.
 

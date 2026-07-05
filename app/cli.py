@@ -13,6 +13,7 @@ from the DB and makes NO LLM call (sizing/risk stay deterministic).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 import yaml
@@ -22,6 +23,36 @@ from app.backtest import ab_harness, engine
 from app.db import connect, init_db
 from app.ingestion import demo, stooq
 from app.logging import decisions as declog
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Load KEY=VALUE pairs from a local `.env` into os.environ (shell env wins).
+
+    Zero-dependency by design: the project keeps its dependency surface small.
+    Only sets keys NOT already present in the environment, so an explicit shell
+    export always overrides the file. Silently no-ops if `.env` is absent (it is
+    optional and .gitignored). Handles blank lines, `#` comments, an optional
+    `export ` prefix, and single/double-quoted values.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key, value = key.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
+    except OSError:
+        return
 
 
 def cmd_ingest(args) -> int:
@@ -268,6 +299,13 @@ def cmd_llm(args) -> int:
 
     print(f"\nMaterialized {n_features} feature rows; "
           f"{n_nothing} instruments had nothing to process.")
+    if n_features == 0 and not degraded_reason:
+        n_filings = conn.execute("SELECT COUNT(*) AS c FROM filings").fetchone()["c"]
+        if n_filings == 0:
+            print("No filings in the DB yet — the LLM pipeline has nothing to "
+                  "read. Start the collector (`make collect` / `make collect-loop`) "
+                  "and let it run: RSS has no backfill, so filing history only "
+                  "accrues going forward.")
     if degraded_reason:
         print("RUN DEGRADED: monthly LLM budget exhausted — the pipeline "
               "continues WITHOUT new LLM features (baseline-only).")
@@ -636,6 +674,7 @@ def _print_metrics_table(result, benchmark_name: str) -> None:
 
 
 def main(argv=None) -> int:
+    _load_dotenv()  # consume a local .env (shell exports still take precedence)
     parser = argparse.ArgumentParser(prog="app.cli", description="GPW deterministic core")
     parser.add_argument("--db", default=None, help="SQLite path (default: data/gpw.db)")
     sub = parser.add_subparsers(dest="command", required=True)

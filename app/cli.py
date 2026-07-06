@@ -23,6 +23,8 @@ from app.backtest import ab_harness, engine
 from app.db import connect, init_db
 from app.ingestion import demo, stooq
 from app.logging import decisions as declog
+from app.paper import loop as paper_loop
+from app.paper.store import PAPER_PREFIX
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -632,7 +634,39 @@ def cmd_ab(args) -> int:
     return 0
 
 
+def cmd_signals(args) -> int:
+    """Daily paper-trading run: settle yesterday's orders, decide today's.
+
+    Cron-friendly (evening, after `make ingest`). Exit codes: 0 = processed or
+    idempotent no-op; 2 = refused (stale/partial data, config change, catch-up
+    cap) — the refusal reason is printed and alerted, state is untouched.
+    """
+    conn = connect(args.db)
+    init_db(conn)
+    universe = cfg.load_universe()
+    bt_cfg = cfg.load_backtest_config()
+    strat = cfg.load_strategy(args.strategy)
+
+    code, report = paper_loop.run_signals(
+        conn,
+        universe=universe,
+        bt_cfg=bt_cfg,
+        strategy_cfg=strat,
+        session_end=args.session,
+        accept_config_change=args.accept_config_change,
+        dry_run=args.dry_run,
+    )
+    print(report.as_text())
+    conn.close()
+    return code
+
+
 def _persist_results(conn, user_id: str, result, *, strategy_id=None, params=None) -> None:
+    if user_id.startswith(PAPER_PREFIX):
+        # The paper loop owns the 'paper:' namespace; a backtest writing into it
+        # would corrupt the live track record (and vice versa is prevented by
+        # paper_user_id always prefixing).
+        raise ValueError(f"backtest user_id must not use the {PAPER_PREFIX!r} namespace")
     for d in result.decisions:
         dec_id = declog.log_decision(
             conn, user_id=user_id, strategy_id=strategy_id, instrument_id=d["instrument_id"],
@@ -727,6 +761,18 @@ def main(argv=None) -> int:
                    help="Pull the latest snapshot and verify it restores")
     sub.add_parser("status",
                    help="Deployment liveness: prices, collector, filings, backups")
+    sig = sub.add_parser("signals",
+                         help="Daily paper-trading run: settle pending orders, "
+                              "generate today's signals, send alert cards")
+    sig.add_argument("--strategy", default="trend_momentum")
+    sig.add_argument("--dry-run", action="store_true",
+                     help="Process and print, then ROLL BACK all writes; no alerts")
+    sig.add_argument("--session", default=None,
+                     help="Clamp the calendar to this ISO date (ops/test hook; "
+                          "fills still use only that session's bars)")
+    sig.add_argument("--accept-config-change", action="store_true",
+                     help="Acknowledge a strategy/cost config change and continue "
+                          "the track record anyway")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -755,6 +801,8 @@ def main(argv=None) -> int:
         return cmd_restore_test(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "signals":
+        return cmd_signals(args)
     return 1
 
 

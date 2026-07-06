@@ -237,6 +237,64 @@ CREATE TABLE IF NOT EXISTS llm_runs (
     detail           TEXT,
     features_written INTEGER NOT NULL DEFAULT 0
 );
+
+-- ---------------------------------------------------------------------------
+-- Daily paper-trading loop (`python -m app.cli signals`). ZERO LLM in this
+-- path. Paper rows in the shared decisions/trades/equity_curve/positions
+-- tables live under user_id 'paper:<user>' so they can never mix with
+-- backtest rows ('default'); the tables below are paper-only state.
+-- ---------------------------------------------------------------------------
+
+-- One row per paper user: cash/peak_equity persist across evening runs.
+-- last_settled_date is the idempotency watermark: the last session fully
+-- settled + decided; a cron re-run the same evening is a no-op. config_hash
+-- pins strategy + costs + execution so a mid-track-record config change must
+-- be acknowledged explicitly (--accept-config-change).
+CREATE TABLE IF NOT EXISTS paper_state (
+    user_id           TEXT PRIMARY KEY,
+    cash              REAL NOT NULL,
+    peak_equity       REAL NOT NULL,
+    initial_capital   REAL NOT NULL,
+    inception_date    TEXT NOT NULL,   -- first session the paper book existed (ISO)
+    last_settled_date TEXT NOT NULL,   -- last fully processed session (ISO)
+    strategy_id       INTEGER REFERENCES strategies(id),
+    config_hash       TEXT NOT NULL,
+    updated_at        TEXT NOT NULL    -- ISO datetime, UTC
+);
+
+-- Pending paper orders: a signal decided on session T's close fills at the
+-- NEXT session's open (the backtest's next-bar contract), which only becomes
+-- computable the following evening after ingest. features_json carries the
+-- signal-date snapshot so the decisions row written at fill time is
+-- byte-compatible with what the backtest persists (CLAUDE.md rule 8).
+-- alerted_at columns drive at-least-once Telegram delivery AFTER commit.
+CREATE TABLE IF NOT EXISTS paper_orders (
+    id                INTEGER PRIMARY KEY,
+    user_id           TEXT NOT NULL,
+    instrument_id     INTEGER NOT NULL REFERENCES instruments(id),
+    side              TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+    qty               INTEGER NOT NULL,
+    stop_price        REAL,             -- initial ATR stop (BUY orders)
+    decision_date     TEXT NOT NULL,    -- session whose close produced the signal
+    features_json     TEXT NOT NULL,    -- feature snapshot at decision time
+    status            TEXT NOT NULL DEFAULT 'PENDING'
+                      CHECK (status IN ('PENDING', 'FILLED', 'PARTIAL', 'LAPSED')),
+    decision_id       INTEGER REFERENCES decisions(id),  -- linked at fill time
+    fill_date         TEXT,
+    fill_qty          INTEGER,
+    fill_price        REAL,
+    lapse_reason      TEXT,             -- no_bar / volume
+    signal_alerted_at TEXT,
+    fill_alerted_at   TEXT,
+    created_at        TEXT NOT NULL     -- ISO datetime, UTC
+);
+CREATE INDEX IF NOT EXISTS idx_paper_orders_user ON paper_orders(user_id, status);
+
+-- At most one OPEN position per (user, instrument). Partial indexes are
+-- Postgres-portable; positions was never written before the paper loop, so
+-- this is safe on pre-existing databases.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_open_unique
+    ON positions(user_id, instrument_id) WHERE status = 'OPEN';
 """
 
 

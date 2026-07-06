@@ -93,3 +93,30 @@ def test_init_db_now_creates_collector_schema(conn):
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "filings" in tables and "collector_health" in tables
+
+
+def test_paper_not_started_is_informational(conn, tmp_path):
+    _seed_prices(conn)
+    filings_db.mark_run_success(conn, new_items=0)
+    _fresh_backup(tmp_path)
+    report = statusmod.run_status(conn, _cfg(tmp_path, collector_stale_minutes=10**9,
+                                             backup_stale_hours=10**9))
+    assert "paper: not started" in report.as_text()
+    assert not any("paper" in s for s in report.stale)
+
+
+def test_paper_loop_behind_is_flagged(conn, tmp_path):
+    _seed_prices(conn)  # 10 sessions of bars
+    filings_db.mark_run_success(conn, new_items=0)
+    _fresh_backup(tmp_path)
+    first = conn.execute("SELECT MIN(date) FROM prices WHERE adjusted = 0").fetchone()[0]
+    conn.execute(
+        "INSERT INTO paper_state (user_id, cash, peak_equity, initial_capital,"
+        " inception_date, last_settled_date, config_hash, updated_at)"
+        " VALUES ('paper:default', 100000, 100000, 100000, ?, ?, 'h', ?)",
+        (first, first, NOW.isoformat()))
+    conn.commit()
+    report = statusmod.run_status(conn, _cfg(tmp_path, collector_stale_minutes=10**9,
+                                             backup_stale_hours=10**9))
+    assert "paper[paper:default]" in report.as_text()
+    assert any("petla paper" in s for s in report.stale)

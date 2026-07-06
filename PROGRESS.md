@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 246 passing.
+ZERO LLM in the money path. **Tests:** 265 passing.
 
 ---
 
@@ -89,6 +89,35 @@ ZERO LLM in the money path. **Tests:** 246 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-06 — Daily paper-trading loop (`make signals`)
+Completes the Phase-1 blueprint gate ("paper trading 1 strategy vs WIG →
+Telegram alert card"): the previously dead seams — the `positions` table and
+`telegram.send_alert` — are now wired into an operational evening loop.
+Suite is **265 passing** (was 246).
+- **Contract = the backtest's, live:** decide on T's close → PENDING order →
+  fill at T+1's open with the full cost model. Each evening run settles
+  yesterday's orders (today's open is now known), then decides today's.
+- **Zero duplicated money math:** settlement via `engine._execute_order`,
+  sizing inputs via the newly extracted `engine.build_day_state` (also used by
+  `run_backtest`), signals via `strategy.evaluate` + `risk.size_position`,
+  corporate actions via the promoted `apply_corporate_action`/
+  `apply_action_to_order`. `tests/test_paper_parity.py` locks paper == backtest
+  (identical trades/equity/cash on a fixture with partial volume-capped sells,
+  a suspension gap, dividends and a split).
+- **New:** `app/paper/` (store + loop), `paper_state`/`paper_orders` tables,
+  `python -m app.cli signals` (`--dry-run`, `--session`,
+  `--accept-config-change`), `make signals`, `paper:` block in
+  `config/backtest.yaml`, Polish signal/fill/lapse/summary cards, paper section
+  in `make status` (stale when the loop falls ≥2 sessions behind).
+- **Isolation:** all paper rows live under `user_id 'paper:default'`;
+  `_persist_results` refuses the `paper:` namespace so backtests can never
+  pollute the live track record.
+- **Ops:** idempotent watermark (`last_settled_date`), one `BEGIN IMMEDIATE`
+  transaction per session (crash-resumable catch-up), refusals on stale/partial
+  data + config drift + oversized gaps, alerts flushed post-commit with
+  at-least-once delivery. The LLM strategy variant reads pre-materialized
+  `llm_features` only — ZERO LLM calls in this path.
 
 ### 2026-07-05 — Onboarding + doc-accuracy pass (readiness audit fixes)
 No behavior change to the money/LLM path; a readiness audit found stale docs

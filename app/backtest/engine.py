@@ -109,7 +109,8 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
         df = compute.load_prices_asof(conn, r["id"], as_of="9999-12-31")
         if df.empty:
             continue
-        feats = compute.compute_features(df, benchmark_close=bench_for_features)
+        actions = _load_actions_map(conn, r["id"])
+        feats = build_features(df, actions, bench_for_features)
         instruments.append(
             Instrument(
                 instrument_id=r["id"],
@@ -119,10 +120,67 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
                 delisted_on=r["delisted_on"],
                 prices=df,
                 features=feats,
-                actions=_load_actions_map(conn, r["id"]),
+                actions=actions,
             )
         )
     return instruments, bench_close
+
+
+def build_features(df: pd.DataFrame, actions: dict[str, list[dict]] | None,
+                   benchmark_close: pd.Series | None) -> pd.DataFrame:
+    """Feature panel for one instrument, corporate-action aware.
+
+    With actions present, features are computed on an in-memory back-adjusted
+    copy of the raw series, so momentum/SMA/ATR bridge split/dividend gaps
+    instead of reading them as market moves (a 1:10 split looked like a -90%
+    return for up to 252 sessions). Price-unit columns (close, sma50, sma200,
+    atr) are rescaled back to RAW units so sizing, stops and fills stay
+    consistent with the raw prices the engine executes at.
+
+    Point-in-time safe: a ratio feature's value at row T is invariant to
+    adjustment factors from ex-dates AFTER T — they scale every bar in the
+    lookback window uniformly and cancel — so each row equals what an
+    as-of-that-row adjustment would produce; no look-ahead. Recomputed from
+    the actions table on every load, so it can never go stale after an ingest
+    (unlike the materialized adjusted=1 rows, which remain for verification).
+    """
+    if not actions:
+        return compute.compute_features(df, benchmark_close=benchmark_close)
+    adj = _back_adjust_df(df, actions)
+    feats = compute.compute_features(adj, benchmark_close=benchmark_close)
+    scale = df["close"] / adj["close"]
+    for col in ("sma50", "sma200", "atr"):
+        feats[col] = feats[col] * scale
+    feats["close"] = df["close"]
+    return feats
+
+
+def _back_adjust_df(df: pd.DataFrame, actions: dict[str, list[dict]]) -> pd.DataFrame:
+    """Back-adjusted copy of a raw OHLC frame (last bar == raw series).
+
+    Same factor math as refdata.back_adjust — refdata.price_factor is the
+    single source: bars strictly before an ex-date are multiplied by that
+    action's price factor, cumulatively across actions. Volume is left
+    untouched (features never read it).
+    """
+    from app.ingestion import refdata  # local import: keeps engine import-light
+
+    adj = df.copy()
+    price_cols = ["open", "high", "low", "close"]
+    for ex_date in sorted(actions):
+        ex = pd.to_datetime(ex_date)
+        prior = df.index[df.index < ex]
+        close_before = float(df.at[prior[-1], "close"]) if len(prior) else None
+        for action in actions[ex_date]:
+            factor = refdata.price_factor(
+                {"action_type": action["action_type"],
+                 "value_or_ratio": action["value_or_ratio"]},
+                close_before,
+            )
+            if factor != 1.0:
+                adj.loc[adj.index < ex, price_cols] = (
+                    adj.loc[adj.index < ex, price_cols] * factor)
+    return adj
 
 
 def _load_actions_map(conn, instrument_id: int) -> dict[str, list[dict]] | None:

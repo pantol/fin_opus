@@ -182,6 +182,8 @@ def cmd_backtest(args) -> int:
         conn.close()
         return 1
 
+    _warn_data_fidelity(conn, universe)
+
     print(f"Running walk-forward backtest on {len(instruments)} instruments "
           f"(strategy: {strat['name']} v{strat['version']})...")
     result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg,
@@ -451,6 +453,34 @@ def _validate_run(conn, strategy_cfg, bt_cfg, result, instruments, membership,
         mc.as_text(),
     ]
     return "\n".join(lines), dsr, mc
+
+
+def _warn_data_fidelity(conn, universe) -> None:
+    """Loud pre-run warnings for known result-corrupting data states.
+
+    A backtest silently run on top of these produces numbers that LOOK fine
+    and are wrong — the operator must see it before reading the metrics.
+    """
+    yaml_actions = cfg.load_corporate_actions().get("actions") or []
+    n_table = conn.execute("SELECT COUNT(*) FROM corporate_actions").fetchone()[0]
+    if len(yaml_actions) != n_table:
+        print(f"WARNING: corporate_actions table ({n_table} rows) is out of sync "
+              f"with config/corporate_actions.yaml ({len(yaml_actions)} entries) — "
+              "run `python -m app.cli refdata` first, or split/dividend gaps "
+              "will corrupt features and fire ATR stops as market moves.")
+    if not any(a.get("action_type") == "dividend" for a in yaml_actions):
+        print("NOTE: no dividends loaded in config/corporate_actions.yaml — the "
+              "simulated portfolio earns PRICE return while WIG20TR is TOTAL "
+              "return (a known conservative bias in every benchmark comparison).")
+    from app.ingestion import quality
+    report = quality.run_checks(conn, universe, cfg.load_data_quality())
+    jumps = [i for i in report.issues if i.category == "unexplained_jump"]
+    if jumps:
+        print(f"WARNING: {len(jumps)} instrument(s) with unexplained price jumps "
+              "(see `make check-data`) — likely missing corporate actions; "
+              "momentum/SMA/ATR and stop logic are corrupted around them:")
+        for issue in jumps[:5]:
+            print(f"  {issue.ticker}: {issue.detail}")
 
 
 def _load_membership(conn, bt_cfg):

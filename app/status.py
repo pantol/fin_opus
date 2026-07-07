@@ -88,6 +88,38 @@ def run_status(conn, backup_cfg: dict, *, now: datetime | None = None) -> Status
     except Exception:  # noqa: BLE001 — filings table may predate unification
         report.lines.append("filings: table missing (collector never ran)")
 
+    # --- paper-trading loop ---
+    paper_stale_sessions = int(status_cfg.get("paper_stale_sessions", 2))
+    state = conn.execute(
+        "SELECT user_id, last_settled_date FROM paper_state ORDER BY user_id"
+    ).fetchall()
+    if not state:
+        report.lines.append("paper: not started — run `make signals`")
+    for s in state:
+        n_open = conn.execute(
+            "SELECT COUNT(*) FROM positions WHERE user_id = ? AND status = 'OPEN'",
+            (s["user_id"],)).fetchone()[0]
+        n_pending = conn.execute(
+            "SELECT COUNT(*) FROM paper_orders WHERE user_id = ? AND status = 'PENDING'",
+            (s["user_id"],)).fetchone()[0]
+        n_unsent = conn.execute(
+            "SELECT COUNT(*) FROM paper_orders WHERE user_id = ?"
+            " AND (signal_alerted_at IS NULL OR (fill_alerted_at IS NULL"
+            "      AND status IN ('FILLED', 'PARTIAL', 'LAPSED')))",
+            (s["user_id"],)).fetchone()[0]
+        report.lines.append(
+            f"paper[{s['user_id']}]: settled {s['last_settled_date']}, "
+            f"{n_open} open, {n_pending} pending, {n_unsent} unsent alert(s)")
+        # Behind = stored sessions the loop has not processed. One is normal
+        # (status may run between ingest and the evening signals run).
+        behind = conn.execute(
+            "SELECT COUNT(DISTINCT date) FROM prices WHERE adjusted = 0 AND date > ?",
+            (s["last_settled_date"],)).fetchone()[0]
+        if behind >= paper_stale_sessions:
+            report.stale.append(
+                f"petla paper {behind} sesje w tyle "
+                f"(ostatnia rozliczona: {s['last_settled_date']})")
+
     # --- newest local backup snapshot ---
     backups_dir = Path(backup_cfg.get("backups_dir", "data/backups"))
     names = sorted(p.name for p in backups_dir.glob("gpw-*.db")

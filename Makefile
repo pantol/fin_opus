@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status label eval-llm clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status signals label eval-llm clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -91,6 +91,12 @@ restore-test:
 # filings backlog, newest backup. Non-zero exit + Telegram alert when stale.
 status:
 	$(PYTHON) -m app.cli status
+
+# Daily paper-trading run: ingest today's session, settle yesterday's pending
+# orders at today's open, decide today's signals, send Polish alert cards.
+# Cron (evening, Warsaw): 30 19 * * 1-5  cd /opt/fin_opus && make signals
+signals: ingest
+	$(PYTHON) -m app.cli signals
 
 clean:
 	rm -f data/*.db

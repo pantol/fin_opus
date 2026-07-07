@@ -199,9 +199,39 @@ make collect-loop &
 make ingest        # top up EOD bars
 make check-data    # sanity-check the fresh data (alerts on issues)
 make llm           # turn today's filings into llm_score features (optional)
+make signals       # daily PAPER run: settle yesterday's orders, decide today's
 make backtest      # walk-forward metrics vs WIG20TR
 make ab            # optional: baseline vs +LLM comparison
 ```
+
+### 8. Daily paper trading (`make signals`)
+
+The live counterpart of the backtest, same contract: a signal decided on
+today's close becomes a **pending order** that fills at the **next session's
+open** with the full cost model (spread + commission + slippage + volume cap).
+Each evening run first *settles* yesterday's pending orders at today's open,
+then *decides* today's signals — so fills are confirmed one evening later,
+exactly like the simulation (`tests/test_paper_parity.py` asserts the two
+produce identical trades on identical data).
+
+```bash
+make signals                              # ingest + evening run (cron-friendly)
+python -m app.cli signals --dry-run       # preview: processes, prints, rolls back
+python -m app.cli signals --session 2026-07-03   # ops/test clamp
+```
+
+State lives in `paper_state` / `paper_orders`; positions, decisions, trades and
+the equity curve go to the shared tables under `user_id 'paper:default'` —
+never mixed with backtest rows. The run refuses (exit 2, Polish Telegram
+alert) on stale data (`paper.max_staleness_days`), a half-ingested session
+(`paper.min_session_coverage`), a changed strategy/cost/universe config
+(acknowledge with `--accept-config-change`), or a catch-up gap beyond
+`paper.catchup_max_sessions`. Re-runs the same evening are no-ops; missed
+evenings are caught up one session at a time, each in its own transaction.
+Signal / fill / lapse cards are sent AFTER commit with at-least-once delivery
+(a Telegram outage or missing token leaves them queued for the next run; the
+portfolio-summary card is best-effort) — alerting can never touch money
+state. Cron example (Warsaw): `30 19 * * 1-5  cd /opt/fin_opus && make signals`.
 
 ## Project structure
 

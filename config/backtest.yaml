@@ -38,3 +38,13 @@ universe:
 
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)
+
+# Daily paper-trading loop (`make signals`, evening after `make ingest`).
+# Paper rows live under user_id 'paper:<user_id>'; costs/risk are NOT repeated
+# here on purpose — the loop reads the same costs/execution/strategy config as
+# the backtest, so the live track record stays comparable to backtest results.
+paper:
+  initial_capital: 100000.0     # PLN; the paper book starts here on first run
+  max_staleness_days: 4         # refuse to decide when the latest session is older
+  min_session_coverage: 0.5     # refuse when < 50% of the universe printed a bar
+  catchup_max_sessions: 10      # refuse to silently churn through a bigger gap

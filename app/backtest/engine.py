@@ -245,12 +245,12 @@ def run_backtest(
         prev_day = calendar[di - 1] if di > 0 else None
         for tk, pos in list(positions.items()):
             inst = inst_by_ticker[tk]
-            actions = _actions_in_window(inst, prev_day, day)
+            actions = actions_in_window(inst, prev_day, day)
             if not actions:
                 continue
             prev_close = _close_before(inst, day)
             for action in actions:
-                cash += _apply_corporate_action(pos, action, prev_close)
+                cash += apply_corporate_action(pos, action, prev_close)
             if pos.qty <= 0:
                 # consolidated below one share: full cash-in-lieu exit above
                 del positions[tk]
@@ -258,8 +258,8 @@ def run_backtest(
             inst = inst_by_ticker.get(order["ticker"])
             if inst is None:
                 continue
-            for action in _actions_in_window(inst, prev_day, day):
-                _apply_action_to_order(order, action)
+            for action in actions_in_window(inst, prev_day, day):
+                apply_action_to_order(order, action)
 
         # --- 1. execute pending orders scheduled for today (next-bar fills) ---
         # Cash is mutated ATOMICALLY here (before mark-to-market), so the equity
@@ -302,47 +302,13 @@ def run_backtest(
         pending_sells = {o["ticker"] for o in pending_orders if o["side"] == "SELL"}
 
         # --- 2. mark-to-market & update trailing stops ---
-        exposure_by_name: dict[str, float] = {}
-        exposure_by_sector: dict[str, float] = {}
-        holdings_value = 0.0
-        for tk, pos in positions.items():
-            inst = inst_by_ticker[tk]
-            close = _close_on(inst, day)
-            if close is None:
-                continue
-            mv = close * pos.qty
-            holdings_value += mv
-            exposure_by_name[tk] = mv
-            exposure_by_sector[pos.sector] = exposure_by_sector.get(pos.sector, 0.0) + mv
-            atr_val = _feature_on(inst, day, "atr")
-            if atr_val:
-                pos.stop_price = risk.update_trailing_stop(pos.stop_price, close, atr_val, atr_mult)
-
-        equity = cash + holdings_value
-        peak_equity = max(peak_equity, equity)
+        state, equity, holdings_value, peak_equity = build_day_state(
+            day=day, positions=positions, pending_buys=pending_buys,
+            inst_by_ticker=inst_by_ticker, cash=cash, peak_equity=peak_equity,
+            atr_mult=atr_mult,
+        )
         exposure_ratio = (holdings_value / equity) if equity > 0 else 0.0
         equity_records.append((day, equity, cash, exposure_ratio))
-
-        # Reserve estimated cost of pending buys so risk does not over-allocate.
-        cash_available = cash
-        for tk, o in pending_buys.items():
-            inst = inst_by_ticker.get(tk)
-            if inst is None:
-                continue
-            ref = _open_on(inst, day) or _close_on(inst, day)
-            if ref:
-                reserved = ref * o["qty"]
-                cash_available -= reserved
-                exposure_by_name[tk] = exposure_by_name.get(tk, 0.0) + reserved
-                if inst.sector is not None:
-                    exposure_by_sector[inst.sector] = exposure_by_sector.get(inst.sector, 0.0) + reserved
-
-        state = risk.PortfolioState(
-            equity=equity, cash=max(0.0, cash_available), peak_equity=peak_equity,
-            open_positions=len(positions) + len(pending_buys),
-            exposure_by_name=exposure_by_name,
-            exposure_by_sector=exposure_by_sector,
-        )
 
         # last bar: no future bar to fill on
         if di + lag >= len(calendar):
@@ -480,6 +446,68 @@ def run_backtest(
 
 # --- helpers -----------------------------------------------------------------
 
+def build_day_state(
+    *,
+    day: pd.Timestamp,
+    positions: dict[str, Position],
+    pending_buys: dict[str, dict],
+    inst_by_ticker: dict[str, Instrument],
+    cash: float,
+    peak_equity: float,
+    atr_mult: float,
+) -> tuple[risk.PortfolioState, float, float, float]:
+    """Mark-to-market at `day`'s close and build the risk layer's inputs.
+
+    Shared by the backtest engine and the live paper loop so the sizing inputs
+    can never drift between the two (the money math exists exactly once).
+
+    Mutates trailing stops on held positions (ratchet up only) and reserves the
+    estimated cost of pending BUY orders in cash/exposure so the risk layer
+    does not over-allocate. Returns (state, equity, holdings_value,
+    peak_equity) with the updated running peak.
+    """
+    exposure_by_name: dict[str, float] = {}
+    exposure_by_sector: dict[str, float] = {}
+    holdings_value = 0.0
+    for tk, pos in positions.items():
+        inst = inst_by_ticker[tk]
+        close = _close_on(inst, day)
+        if close is None:
+            continue
+        mv = close * pos.qty
+        holdings_value += mv
+        exposure_by_name[tk] = mv
+        exposure_by_sector[pos.sector] = exposure_by_sector.get(pos.sector, 0.0) + mv
+        atr_val = _feature_on(inst, day, "atr")
+        if atr_val:
+            pos.stop_price = risk.update_trailing_stop(pos.stop_price, close, atr_val, atr_mult)
+
+    equity = cash + holdings_value
+    peak_equity = max(peak_equity, equity)
+
+    # Reserve estimated cost of pending buys so risk does not over-allocate.
+    cash_available = cash
+    for tk, o in pending_buys.items():
+        inst = inst_by_ticker.get(tk)
+        if inst is None:
+            continue
+        ref = _open_on(inst, day) or _close_on(inst, day)
+        if ref:
+            reserved = ref * o["qty"]
+            cash_available -= reserved
+            exposure_by_name[tk] = exposure_by_name.get(tk, 0.0) + reserved
+            if inst.sector is not None:
+                exposure_by_sector[inst.sector] = exposure_by_sector.get(inst.sector, 0.0) + reserved
+
+    state = risk.PortfolioState(
+        equity=equity, cash=max(0.0, cash_available), peak_equity=peak_equity,
+        open_positions=len(positions) + len(pending_buys),
+        exposure_by_name=exposure_by_name,
+        exposure_by_sector=exposure_by_sector,
+    )
+    return state, equity, holdings_value, peak_equity
+
+
 def _close_on(inst: Instrument, day: pd.Timestamp):
     if day in inst.prices.index:
         val = inst.prices.at[day, "close"]
@@ -510,8 +538,8 @@ def _feature_on(inst: Instrument, day: pd.Timestamp, name: str):
     return None
 
 
-def _actions_in_window(inst: Instrument, prev_day: pd.Timestamp | None,
-                       day: pd.Timestamp) -> list[dict]:
+def actions_in_window(inst: Instrument, prev_day: pd.Timestamp | None,
+                      day: pd.Timestamp) -> list[dict]:
     """Actions with ex_date in (prev_day, day] -- ISO string comparison.
 
     Bridges ex-dates recorded on non-session days (weekend/holiday, or a day
@@ -543,7 +571,7 @@ def _close_before(inst: Instrument, day: pd.Timestamp):
     return None if pd.isna(val) else float(val)
 
 
-def _apply_corporate_action(pos: Position, action: dict, prev_close: float | None) -> float:
+def apply_corporate_action(pos: Position, action: dict, prev_close: float | None) -> float:
     """Re-base a held position for an ex-date action. Returns the cash delta.
 
     split (r new per old): qty scaled with FLOOR; the fractional remainder is
@@ -582,7 +610,7 @@ def _apply_corporate_action(pos: Position, action: dict, prev_close: float | Non
     raise ValueError(f"unknown corporate action type: {kind}")
 
 
-def _apply_action_to_order(order: dict, action: dict) -> None:
+def apply_action_to_order(order: dict, action: dict) -> None:
     """Re-base an in-flight order for an ex-date action.
 
     Both sides scale their share count on a split: a BUY queued at cum prices
@@ -640,6 +668,11 @@ def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
 
 # Backwards-compatible aliases (pre-Pack-D names).
 strategy_uses_llm_score = strategy_uses_llm_features
+
+# Backwards-compatible aliases (pre-paper-loop private names).
+_actions_in_window = actions_in_window
+_apply_corporate_action = apply_corporate_action
+_apply_action_to_order = apply_action_to_order
 
 
 def _llm_score_on(inst: Instrument, day: pd.Timestamp):

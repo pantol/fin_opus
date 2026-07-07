@@ -198,6 +198,10 @@ def cmd_backtest(args) -> int:
         print("\nWARNING: not enough history for in-sample + embargo + OOS — "
               "this is a FULL-SPAN run, NOT out-of-sample. Treat these metrics "
               "as in-sample evidence only.")
+    if result.metrics.get("oos_start_clamped_to_benchmark"):
+        print(f"\nNOTE: measured span clamped to benchmark availability — starts "
+              f"{result.metrics['oos_start_clamped_to_benchmark']}; earlier "
+              "sessions have no benchmark to compare against (rule 5).")
     _print_metrics_table(result, bt_cfg["walk_forward"]["benchmark"])
     validation_text, _dsr, _mc = _validate_run(conn, strat, bt_cfg, result,
                                                instruments, membership)

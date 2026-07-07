@@ -221,6 +221,15 @@ def run_backtest(
         calendar = calendar[calendar >= start]
     if end is not None:
         calendar = calendar[calendar <= end]
+    # The strategy-vs-benchmark comparison (rule 5) is only meaningful where
+    # the benchmark actually existed: sessions before its first bar are
+    # dropped rather than back-filled with future values.
+    benchmark_clamp: str | None = None
+    if benchmark_close is not None and not benchmark_close.empty and len(calendar):
+        first_bench = benchmark_close.index[0]
+        if calendar[0] < first_bench:
+            calendar = calendar[calendar >= first_bench]
+            benchmark_clamp = first_bench.date().isoformat()
 
     cash = float(bt_cfg["initial_capital"])
     peak_equity = cash
@@ -429,13 +438,16 @@ def run_backtest(
 
     m = metricsmod.compute_metrics(equity_series, trade_pnls, total_buy_notional)
     bm = metricsmod.compute_metrics(bench_curve, [], 0.0)
+    m_dict = m.as_dict()
+    if benchmark_clamp is not None:
+        m_dict["oos_start_clamped_to_benchmark"] = benchmark_clamp
 
     return BacktestResult(
         equity_curve=equity_series,
         benchmark_curve=bench_curve,
         trade_pnls=trade_pnls,
         total_buy_notional=total_buy_notional,
-        metrics=m.as_dict(),
+        metrics=m_dict,
         benchmark_metrics=bm.as_dict(),
         decisions=decisions_log,
         cash_curve=cash_series,
@@ -765,7 +777,15 @@ def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, dec
 def _benchmark_buy_and_hold(bench_close: pd.Series, index: pd.DatetimeIndex, capital: float) -> pd.Series:
     if bench_close is None or bench_close.empty:
         return pd.Series([capital] * len(index), index=index, dtype=float)
-    aligned = bench_close.reindex(index).ffill().bfill()
+    # ffill only: back-filling would fabricate a flat zero-return benchmark
+    # segment out of FUTURE values for dates before the index's first real bar,
+    # silently understating WIG20TR. run_backtest clamps the calendar to the
+    # benchmark's availability, so a leading NaN here is a caller bug.
+    aligned = bench_close.reindex(index).ffill()
+    if len(aligned) and pd.isna(aligned.iloc[0]):
+        raise ValueError(
+            "benchmark history starts after the requested span — clamp the "
+            "calendar to the benchmark's first bar (run_backtest does this)")
     if aligned.empty or aligned.iloc[0] == 0:
         return pd.Series([capital] * len(index), index=index, dtype=float)
     return capital * aligned / aligned.iloc[0]

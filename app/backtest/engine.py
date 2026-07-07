@@ -399,7 +399,9 @@ def run_backtest(
         last_day = calendar[-1]
         for tk, pos in list(positions.items()):
             inst = inst_by_ticker[tk]
-            ref = _close_on(inst, last_day)
+            # a name suspended on the last session force-closes at its last
+            # known close (same mark the equity carried); delisted -> written off
+            ref = _mark_price(inst, last_day)
             if ref is None:
                 continue
             fill = fillmod.simulate_fill(
@@ -417,9 +419,9 @@ def run_backtest(
         if equity_records:
             d, _eq, _c, _ex = equity_records[-1]
             remaining_mv = sum(
-                _close_on(inst_by_ticker[t], last_day) * p.qty
+                _mark_price(inst_by_ticker[t], last_day) * p.qty
                 for t, p in positions.items()
-                if _close_on(inst_by_ticker[t], last_day) is not None
+                if _mark_price(inst_by_ticker[t], last_day) is not None
             )
             final_equity = cash + remaining_mv
             ratio = (remaining_mv / final_equity) if final_equity > 0 else 0.0
@@ -483,7 +485,7 @@ def build_day_state(
     holdings_value = 0.0
     for tk, pos in positions.items():
         inst = inst_by_ticker[tk]
-        close = _close_on(inst, day)
+        close = _mark_price(inst, day)
         if close is None:
             continue
         mv = close * pos.qty
@@ -527,6 +529,21 @@ def _close_on(inst: Instrument, day: pd.Timestamp):
         # the fill model (it would fill at NaN and poison cash/equity).
         return None if pd.isna(val) else float(val)
     return None
+
+
+def _mark_price(inst: Instrument, day: pd.Timestamp):
+    """Mark-to-market reference for a HELD position on `day`.
+
+    Today's close when the instrument printed a bar; otherwise the last known
+    close while it is still listed (a suspension is not a -100% market move —
+    zero-marking created phantom drawdowns that tripped the circuit breaker
+    and freed the exposure caps). Once delisted the position is worth zero
+    (implicit write-off): there is no market left to sell into.
+    """
+    close = _close_on(inst, day)
+    if close is None and _alive(inst, day):
+        close = _close_before(inst, day)
+    return close
 
 
 def _open_on(inst: Instrument, day: pd.Timestamp):

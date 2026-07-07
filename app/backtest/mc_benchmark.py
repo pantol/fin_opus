@@ -10,8 +10,9 @@ cost-matched randomness has no edge, even if it beats the index.
 
 Simulation conventions (kept deliberately aligned with the engine):
   - entries fill on the session AFTER the sampled signal session, at the open;
-  - positions are valued at the actual close, and at ZERO on sessions with no
-    bar (suspensions/delistings) — the engine's mark-to-market convention;
+  - positions are valued at the actual close, at the LAST KNOWN close on
+    sessions with no bar while listed (suspensions), and at ZERO once
+    delisted — the engine's mark-to-market convention;
   - cash available to an entry includes only proceeds booked ON OR BEFORE its
     signal session (no look-ahead into future partial-exit fills);
   - infeasible random entries (full book, no eligible instrument, sizing
@@ -107,7 +108,8 @@ class _InstArrays:
     sector: str | None
     instrument_id: int
     open: np.ndarray       # NaN where no bar
-    close_mark: np.ndarray  # close, 0.0 on sessions with no bar (engine's MTM rule)
+    close_mark: np.ndarray  # last known close while listed, 0.0 once delisted
+                            # or before the first bar (engine's MTM rule)
     volume: np.ndarray     # 0 where no bar
     atr: np.ndarray        # NaN where unavailable
     has_bar: np.ndarray    # bool
@@ -119,18 +121,24 @@ def _prepare(instruments: list[Instrument], calendar: pd.DatetimeIndex,
     out = []
     for inst in instruments:
         prices = inst.prices.reindex(calendar)
-        # No forward-fill: the engine marks a position at ZERO on a session
-        # with no bar; the null strategies must suffer the same convention or
-        # the two sides of the percentile use different accounting.
-        close_mark = prices["close"].fillna(0.0).to_numpy(dtype=float)
+        # Mark-to-market convention = engine.build_day_state's: last known
+        # close while listed (a suspension is a stale mark, not a -100% move),
+        # zero once delisted (write-off) or before the first bar. The null
+        # strategies must use the same accounting or the two sides of the
+        # percentile diverge. Membership never affects marking — it only
+        # gates NEW entries. Fills stay guarded by has_bar, so the forward
+        # fill can never leak a stale price into an execution.
+        listing_alive = np.ones(len(calendar), dtype=bool)
+        if inst.listed_from:
+            listing_alive &= np.asarray(calendar >= pd.to_datetime(inst.listed_from))
+        if inst.delisted_on:
+            listing_alive &= np.asarray(calendar <= pd.to_datetime(inst.delisted_on))
+        close_mark = prices["close"].ffill().fillna(0.0).to_numpy(dtype=float).copy()
+        close_mark[~listing_alive] = 0.0
         atr = (inst.features["atr"].reindex(calendar).to_numpy(dtype=float)
                if "atr" in inst.features.columns else np.full(len(calendar), np.nan))
         has_bar = prices["close"].notna().to_numpy()
-        alive = np.ones(len(calendar), dtype=bool)
-        if inst.listed_from:
-            alive &= np.asarray(calendar >= pd.to_datetime(inst.listed_from))
-        if inst.delisted_on:
-            alive &= np.asarray(calendar <= pd.to_datetime(inst.delisted_on))
+        alive = listing_alive.copy()
         if membership is not None:
             ranges = membership.get(inst.instrument_id)
             alive &= np.array([_member_on(ranges, day) for day in calendar])
@@ -194,8 +202,8 @@ def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
                         holdings_curve[t:] -= fill.qty * arr.close_mark[t:]
                         remaining -= fill.qty
             t += 1
-        # shares that never found volume stay as market value (0.0 once the
-        # instrument stops printing bars) — the engine's forced-close convention
+        # shares that never found volume stay as market value (last known
+        # close while listed, 0.0 once delisted) — the engine's convention
 
     # chronological attempt queue; failures respawn at a later random session
     attempts = sorted(int(x) for x in rng.integers(0, max(1, last), size=n_entries))

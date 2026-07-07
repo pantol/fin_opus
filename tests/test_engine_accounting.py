@@ -8,6 +8,7 @@ Covers:
 - equity curve carries real cash + exposure
 """
 import pandas as pd
+import pytest
 
 from app import config as cfg
 from app.backtest import engine
@@ -123,6 +124,78 @@ def test_partial_sell_preserves_remaining_shares(conn):
     assert unfilled == 100 - max_fillable
     assert len(trade_pnls) == 1
     assert cash_delta > 0  # sale produced proceeds
+
+
+def test_suspended_position_marks_at_last_close_not_zero(conn):
+    """A4: a held name printing no bar is a stale mark, not a -100% move.
+
+    Zero-marking created phantom drawdowns (falsely tripping the 25% circuit
+    breaker) and freed the exposure caps for over-allocation.
+    """
+    rows = synthetic_series(n=10, base=100, drift=0.0)
+    _ingest(conn, "sus", rows[:5] + rows[7:], sector="x", listed_from="2015-01-01")
+    conn.commit()
+    prices = engine.compute.load_prices_asof(conn, 1, as_of="9999-12-31")
+    inst = engine.Instrument(
+        instrument_id=1, ticker="sus", sector="x", listed_from="2015-01-01",
+        delisted_on=None, prices=prices,
+        features=engine.compute.compute_features(prices))
+    positions = {"sus": engine.Position(ticker="sus", sector="x", instrument_id=1,
+                                        qty=100, entry_price=100.0,
+                                        entry_date="2015-01-01", stop_price=90.0)}
+    gap_day = pd.Timestamp(rows[5][0])            # suspended session
+    last_close = float(prices["close"].iloc[4])   # last bar before the gap
+
+    state, equity, holdings, _peak = engine.build_day_state(
+        day=gap_day, positions=positions, pending_buys={},
+        inst_by_ticker={"sus": inst}, cash=1000.0, peak_equity=100000.0,
+        atr_mult=2.5)
+    assert holdings == 100 * last_close                  # stale mark, not zero
+    assert state.exposure_by_name["sus"] == 100 * last_close  # caps still see it
+    assert equity == 1000.0 + 100 * last_close
+
+    # once DELISTED the position is written off (no market left to sell into)
+    dead = engine.Instrument(
+        instrument_id=1, ticker="sus", sector="x", listed_from="2015-01-01",
+        delisted_on=rows[4][0], prices=prices,
+        features=engine.compute.compute_features(prices))
+    state, equity, holdings, _peak = engine.build_day_state(
+        day=gap_day, positions=dict(positions), pending_buys={},
+        inst_by_ticker={"sus": dead}, cash=1000.0, peak_equity=100000.0,
+        atr_mult=2.5)
+    assert holdings == 0.0 and equity == 1000.0
+
+
+def test_equity_is_continuous_across_a_suspension(conn):
+    """End to end: a mid-span suspension must not crater the equity curve."""
+    rows = synthetic_series(n=60, base=100, drift=0.0)
+    _ingest(conn, "wig20tr", synthetic_series(n=60, base=2000, drift=0.0),
+            is_index=True)
+    _ingest(conn, "aaa", rows[:30] + rows[40:], sector="tech",
+            listed_from="2015-01-01")
+    # a second name trading every day keeps the gap days on the union calendar
+    _ingest(conn, "bbb", synthetic_series(n=60, base=50, drift=0.0),
+            sector="fin", listed_from="2015-01-01")
+    conn.commit()
+    uni = {"benchmark": {"ticker": "wig20tr", "is_index": True}, "indices": [],
+           "instruments": [{"ticker": "aaa", "sector": "tech"},
+                           {"ticker": "bbb", "sector": "fin"}]}
+    strat = {  # always-enter toy: in position well before the gap
+        "name": "toy", "version": 1,
+        "entry": {"all": [{"feature": "close", "op": "gt", "value": 0.0}]},
+        "exit": {"any": [{"feature": "close", "op": "lt", "value": 0.0}]},
+        "risk": dict(cfg.load_strategy("trend_momentum")["risk"]),
+    }
+    instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
+    res = engine.run_backtest(instruments, bench, strat,
+                              cfg.load_backtest_config())
+    gap_days = [pd.Timestamp(r[0]) for r in rows[30:40]]
+    before = res.equity_curve[pd.Timestamp(rows[29][0])]
+    # The 'aaa' position (~20% of equity) is stale-marked through the gap:
+    # equity may wiggle with 'bbb', but the pre-fix phantom write-off of the
+    # whole aaa position value must never reappear.
+    for d in gap_days:
+        assert abs(res.equity_curve[d] - before) < 0.01 * before
 
 
 def test_no_duplicate_pending_buys_for_same_ticker(conn):

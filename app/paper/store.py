@@ -39,9 +39,11 @@ def load_state(conn, user_id: str):
 
 def init_state(conn, *, user_id: str, initial_capital: float, inception_date: str,
                last_settled_date: str, strategy_id: int, config_hash: str) -> None:
+    # OR IGNORE: two concurrent first runs may both reach bootstrap; the loser
+    # must adopt the winner's row (callers re-load) instead of crashing.
     conn.execute(
         """
-        INSERT INTO paper_state
+        INSERT OR IGNORE INTO paper_state
             (user_id, cash, peak_equity, initial_capital, inception_date,
              last_settled_date, strategy_id, config_hash, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -199,6 +201,15 @@ def mark_order_lapsed(conn, row_id: int, *, fill_date: str, reason: str) -> None
         "UPDATE paper_orders SET status = 'LAPSED', fill_date = ?, lapse_reason = ?"
         " WHERE id = ?",
         (fill_date, reason, row_id),
+    )
+
+
+def mark_order_requeued(conn, row_id: int, *, fill_date: str) -> None:
+    """Volume-capped zero fill: the retry is a FRESH row (see db.py) so the
+    next session's ORDER BY id settlement matches the engine's requeue order."""
+    conn.execute(
+        "UPDATE paper_orders SET status = 'REQUEUED', fill_date = ? WHERE id = ?",
+        (fill_date, row_id),
     )
 
 

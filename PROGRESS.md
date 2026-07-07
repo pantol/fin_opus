@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 265 passing.
+ZERO LLM in the money path. **Tests:** 272 passing.
 
 ---
 
@@ -94,7 +94,7 @@ ZERO LLM in the money path. **Tests:** 265 passing.
 Completes the Phase-1 blueprint gate ("paper trading 1 strategy vs WIG →
 Telegram alert card"): the previously dead seams — the `positions` table and
 `telegram.send_alert` — are now wired into an operational evening loop.
-Suite is **265 passing** (was 246).
+Suite is **272 passing** (was 246).
 - **Contract = the backtest's, live:** decide on T's close → PENDING order →
   fill at T+1's open with the full cost model. Each evening run settles
   yesterday's orders (today's open is now known), then decides today's.

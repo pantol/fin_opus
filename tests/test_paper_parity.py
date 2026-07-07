@@ -73,6 +73,17 @@ def _seed_market(conn):
     gappy = _two_phase(base=80, drift=0.0011, turn_at=380)
     gappy = gappy[:260] + gappy[270:]
     _ingest(conn, "gappy", gappy, sector="mining", listed_from="2018-01-01")
+    # Volume shaped to force both engine requeue paths deterministically
+    # (10% participation cap; 5.0 volume => 0 fillable shares):
+    #   - thin during [200, 250): the first BUY attempts (signals start right
+    #     after the ~200-session warmup) zero-fill => LAPSED, until the entry
+    #     fills once volume returns at 250;
+    #   - thin again from the decline at 340: the exit SELL zero-fills and
+    #     re-queues session after session => REQUEUED chain.
+    thinvol = _two_phase(base=40, drift=0.0011, turn_at=340,
+                         volume=lambda i: 5.0 if (200 <= i < 250 or i >= 340)
+                         else 900.0)
+    _ingest(conn, "thinvol", thinvol, sector="retail", listed_from="2018-01-01")
 
     # Corporate actions landing well after the ~200-session warmup, while the
     # positions are held: dividends on the trend name, a split on lowvol.
@@ -95,7 +106,8 @@ def _universe():
         "indices": [],
         "instruments": [{"ticker": "up", "sector": "tech"},
                         {"ticker": "lowvol", "sector": "banking"},
-                        {"ticker": "gappy", "sector": "mining"}],
+                        {"ticker": "gappy", "sector": "mining"},
+                        {"ticker": "thinvol", "sector": "retail"}],
     }
 
 
@@ -127,7 +139,8 @@ def _run_both(market):
         conn, user_id=user_id, initial_capital=float(bt_cfg["initial_capital"]),
         inception_date=calendar[0].date().isoformat(),
         last_settled_date=(calendar[0].date() - timedelta(days=1)).isoformat(),
-        strategy_id=strategy_id, config_hash=loop.config_hash(strat, bt_cfg),
+        strategy_id=strategy_id,
+        config_hash=loop.config_hash(strat, bt_cfg, _universe()),
     )
     conn.commit()
     now = datetime.fromisoformat(calendar[-1].date().isoformat()) + timedelta(hours=19)
@@ -195,13 +208,17 @@ def test_final_book_matches_engine_net(market):
     for r in open_rows:
         assert r["qty"] > 0
         assert r["stop_price"] > 0
+        if r["ticker"] != "lowvol":  # lowvol's held qty was rebased by the split
+            assert r["qty"] == net[r["ticker"]]
 
 
 def test_lapsed_and_partial_orders_are_recorded(market):
     conn, result, calendar, user_id = _run_both(market)
     statuses = {r["status"] for r in conn.execute(
         "SELECT status FROM paper_orders WHERE user_id = ?", (user_id,)).fetchall()}
-    # the low-volume instrument forces PARTIAL sells; the final session's
-    # signals stay PENDING (they fill next live session)
+    # lowvol forces PARTIAL sells; thinvol forces BUY volume-lapses and
+    # zero-fill SELL requeues; the final session's signals stay PENDING
     assert "PARTIAL" in statuses
     assert "FILLED" in statuses
+    assert "LAPSED" in statuses
+    assert "REQUEUED" in statuses

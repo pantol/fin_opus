@@ -769,7 +769,8 @@ def main(argv=None) -> int:
                      help="Process and print, then ROLL BACK all writes; no alerts")
     sig.add_argument("--session", default=None,
                      help="Clamp the calendar to this ISO date (ops/test hook; "
-                          "fills still use only that session's bars)")
+                          "fills still use only that session's bars; skips the "
+                          "staleness gate — an explicit replay is deliberate)")
     sig.add_argument("--accept-config-change", action="store_true",
                      help="Acknowledge a strategy/cost config change and continue "
                           "the track record anyway")

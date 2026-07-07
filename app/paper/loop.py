@@ -78,17 +78,24 @@ class PaperRunReport:
                 stop = f", stop {o['stop_price']:.2f}" if o.get("stop_price") else ""
                 lines.append(f"    signal {o['side']:<4} {o['ticker']:<8} qty {o['qty']}{stop} "
                              f"(fills next session open)")
+            for a in s.anomalies:
+                lines.append(f"    anomaly {a['type']}: {a['side']} {a['ticker']}")
         for w in self.warnings:
             lines.append(f"  WARNING: {w}")
         return "\n".join(lines)
 
 
-def config_hash(strategy_cfg: dict, bt_cfg: dict) -> str:
-    """Pin of everything that makes paper results comparable over time."""
+def config_hash(strategy_cfg: dict, bt_cfg: dict, universe: dict) -> str:
+    """Pin of everything that makes paper results comparable over time —
+    strategy rules/risk, costs, execution AND the tradable universe (both the
+    instrument list and the optional index-membership gate): changing any of
+    these changes what the book would have done."""
     payload = {
         "strategy": strategy_cfg,
         "costs": bt_cfg["costs"],
         "execution": bt_cfg.get("execution", {}),
+        "universe": universe.get("instruments", []),
+        "universe_gate": (bt_cfg.get("universe") or {}).get("index"),
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -136,6 +143,7 @@ def run_signals(
         report.reason = (f"signal_to_fill_lag_days={lag} is not supported live: the "
                          "paper loop settles PENDING orders on the next processed "
                          "session (lag 1), matching config/backtest.yaml")
+        _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
 
     conn.execute("PRAGMA busy_timeout = 30000")
@@ -145,6 +153,7 @@ def run_signals(
     instruments, _bench_close = engine.load_instruments(conn, universe, bench)
     if not instruments:
         report.reason = "no price data — run `make ingest` first"
+        _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
     if engine.strategy_uses_llm_features(strategy_cfg):
         # Reads pre-materialized llm_features rows; NO LLM call happens here.
@@ -157,6 +166,7 @@ def run_signals(
         if not membership:
             report.reason = (f"universe.index='{index_name}' is set but the "
                              "index_membership table is empty — run refdata first")
+            _alert_refusal(send_fn, report.reason, dry_run)
             return EXIT_REFUSED, report
 
     calendar = engine._trading_calendar(instruments)
@@ -164,6 +174,7 @@ def run_signals(
         calendar = calendar[calendar <= pd.to_datetime(session_end)]
     if len(calendar) == 0:
         report.reason = "empty trading calendar"
+        _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
     latest = calendar[-1]
 
@@ -172,11 +183,16 @@ def run_signals(
     today = (now or datetime.now(WARSAW)).date()
     age_days = (today - latest.date()).days
     if age_days > int(paper_cfg["max_staleness_days"]):
-        report.reason = (f"latest session {latest.date().isoformat()} is {age_days} "
-                         f"days old (max_staleness_days="
-                         f"{paper_cfg['max_staleness_days']}) — ingest broken?")
-        _alert_refusal(send_fn, report.reason, dry_run)
-        return EXIT_REFUSED, report
+        if session_end is not None:
+            # an explicit --session clamp is a deliberate replay of an older
+            # session — refusing (and paging the operator) would be spurious
+            report.warnings.append("staleness gate skipped (--session clamp)")
+        else:
+            report.reason = (f"latest session {latest.date().isoformat()} is {age_days} "
+                             f"days old (max_staleness_days="
+                             f"{paper_cfg['max_staleness_days']}) — ingest broken?")
+            _alert_refusal(send_fn, report.reason, dry_run)
+            return EXIT_REFUSED, report
     alive = [i for i in instruments if engine._alive(i, latest)]
     with_bar = [i for i in alive if latest in i.prices.index]
     if not alive or (len(with_bar) / len(alive)) < float(paper_cfg["min_session_coverage"]):
@@ -187,12 +203,13 @@ def run_signals(
         return EXIT_REFUSED, report
 
     # --- state / watermark ----------------------------------------------------
-    chash = config_hash(strategy_cfg, bt_cfg)
+    chash = config_hash(strategy_cfg, bt_cfg, universe)
     state_row = store.load_state(conn, user_id)
     if state_row is not None and state_row["config_hash"] != chash and not accept_config_change:
-        report.reason = ("strategy/cost config changed since the paper track record "
-                         "started — rerun with --accept-config-change to acknowledge "
-                         "(results before/after are not comparable)")
+        report.reason = ("strategy/cost/universe config changed since the paper track "
+                         "record started — rerun with --accept-config-change to "
+                         "acknowledge (results before/after are not comparable)")
+        _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
 
     if dry_run:
@@ -231,6 +248,7 @@ def run_signals(
                          f"catchup_max_sessions={paper_cfg['catchup_max_sessions']} — "
                          "a gap this large is an ops problem; raise the cap "
                          "explicitly to catch up")
+        _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
 
     if not todo:
@@ -274,6 +292,13 @@ def run_signals(
             peak_equity = float(fresh["peak_equity"])
             before = calendar[calendar < day]
             prev_day = before[-1] if len(before) else None
+            # Anchor the corporate-action window at the persisted watermark: if
+            # the watermark session vanished from a recomputed union calendar
+            # (data revision), a plain calendar-prev would re-cover an already
+            # applied ex-date window and double-apply splits/dividends.
+            last_done = pd.to_datetime(fresh["last_settled_date"])
+            if prev_day is None or prev_day < last_done:
+                prev_day = last_done
             cash, peak_equity, session = _process_session(
                 conn, day=day, prev_day=prev_day, user_id=user_id,
                 strategy_id=strategy_id, instruments=instruments,
@@ -405,9 +430,23 @@ def _process_session(
         # SELL
         if not filled:
             if unfilled > 0:
-                # zero fill under the volume cap: the engine re-queues the whole
-                # quantity for the next bar — the row simply stays PENDING
-                still_pending.append(order)
+                # Zero fill under the volume cap: the engine re-queues the whole
+                # quantity for the next bar. The retry is a FRESH row — like a
+                # partial fill's remainder — so ascending row ids always encode
+                # the engine's requeue order and ORDER BY id reloads settle in
+                # the exact same sequence.
+                store.mark_order_requeued(conn, order["_row_id"], fill_date=day_iso)
+                requeued = {
+                    "side": "SELL", "ticker": order["ticker"], "qty": int(unfilled),
+                    "decision_date": order["decision_date"],
+                    "features": order["features"],
+                }
+                requeued["_row_id"] = store.insert_order(
+                    conn, user_id, instrument_id=inst.instrument_id, side="SELL",
+                    qty=int(unfilled), stop_price=None,
+                    decision_date=order["decision_date"], features=order["features"])
+                store.mark_signal_alerted(conn, requeued["_row_id"])  # not a new signal
+                still_pending.append(requeued)
             else:
                 # defensive: SELL without a matching position (should not happen)
                 store.mark_order_lapsed(conn, order["_row_id"], fill_date=day_iso,
@@ -567,28 +606,46 @@ def _alert_refusal(send_fn, reason: str, dry_run: bool) -> None:
         pass
 
 
+def _delivered(result) -> bool:
+    """telegram.send_text returns {'sent': False} in token-less dry-run mode.
+
+    A misconfigured cron environment (missing .env) must NOT consume the card
+    queue as 'alerted' — those rows stay NULL and deliver once the token is
+    configured. Injected test send_fns returning None count as delivered.
+    """
+    return not (isinstance(result, dict) and result.get("sent") is False)
+
+
 def _flush_alerts(conn, user_id: str, send_fn, report: PaperRunReport) -> None:
     """Send Polish cards for unalerted signals/outcomes, then one summary.
 
     Sends happen AFTER the money-state commits; each row is marked only after
-    a successful send, so a crash or Telegram outage re-delivers next run
-    (at-least-once) and never double-books a fill.
+    a DELIVERED send, so a crash, Telegram outage or missing token re-delivers
+    next run (at-least-once) and never double-books a fill. The summary card
+    is best-effort (not queued).
     """
     if send_fn is None:
         return
+    undelivered = 0
     try:
         for row in store.unalerted_outcomes(conn, user_id):
-            send_fn(telegram.format_order_outcome_pl(dict(row)))
-            store.mark_outcome_alerted(conn, row["id"])
-            conn.commit()
+            if _delivered(send_fn(telegram.format_order_outcome_pl(dict(row)))):
+                store.mark_outcome_alerted(conn, row["id"])
+                conn.commit()
+            else:
+                undelivered += 1
         for row in store.unalerted_signals(conn, user_id):
             # During a multi-session catch-up an order created at S is already
             # settled at S+1 by flush time — a "fills at next session" card
             # would be stale noise; its outcome card (above) tells the story.
-            if row["status"] == "PENDING":
-                send_fn(telegram.format_order_signal_pl(dict(row)))
-            store.mark_signal_alerted(conn, row["id"])
-            conn.commit()
+            if row["status"] != "PENDING":
+                store.mark_signal_alerted(conn, row["id"])
+                conn.commit()
+            elif _delivered(send_fn(telegram.format_order_signal_pl(dict(row)))):
+                store.mark_signal_alerted(conn, row["id"])
+                conn.commit()
+            else:
+                undelivered += 1
         if report.sessions:
             last = report.sessions[-1]
             send_fn(telegram.format_paper_summary_pl(
@@ -596,3 +653,6 @@ def _flush_alerts(conn, user_id: str, send_fn, report: PaperRunReport) -> None:
                 n_open=last.n_open))
     except Exception as exc:  # noqa: BLE001 — alerting must never break the loop
         report.warnings.append(f"alert delivery failed (will retry next run): {exc}")
+    if undelivered:
+        report.warnings.append(
+            f"telegram not configured: {undelivered} card(s) stay queued for delivery")

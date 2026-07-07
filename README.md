@@ -224,12 +224,13 @@ State lives in `paper_state` / `paper_orders`; positions, decisions, trades and
 the equity curve go to the shared tables under `user_id 'paper:default'` —
 never mixed with backtest rows. The run refuses (exit 2, Polish Telegram
 alert) on stale data (`paper.max_staleness_days`), a half-ingested session
-(`paper.min_session_coverage`), a changed strategy/cost config (acknowledge
-with `--accept-config-change`), or a catch-up gap beyond
+(`paper.min_session_coverage`), a changed strategy/cost/universe config
+(acknowledge with `--accept-config-change`), or a catch-up gap beyond
 `paper.catchup_max_sessions`. Re-runs the same evening are no-ops; missed
 evenings are caught up one session at a time, each in its own transaction.
-Alert cards (new signal / fill / lapse / portfolio summary) are sent AFTER
-commit with at-least-once delivery — a Telegram outage never touches money
+Signal / fill / lapse cards are sent AFTER commit with at-least-once delivery
+(a Telegram outage or missing token leaves them queued for the next run; the
+portfolio-summary card is best-effort) — alerting can never touch money
 state. Cron example (Warsaw): `30 19 * * 1-5  cd /opt/fin_opus && make signals`.
 
 ## Project structure

@@ -125,11 +125,22 @@ def test_next_evening_settles_at_open_and_updates_positions(conn):
 
 def test_staleness_gate_refuses(conn):
     calendar = _seed(conn)
-    code, rep = _run(conn, calendar=calendar,
+    code, rep = _run(conn, calendar=calendar, session_end=None,
                      now=_now_at(calendar[-1]) + timedelta(days=30))
     assert code == 2 and rep.status == "refused"
     assert "days old" in rep.reason
     assert store.load_state(conn, "paper:default") is None  # no writes
+
+
+def test_explicit_session_clamp_skips_staleness_gate(conn):
+    """--session is a deliberate replay: no refusal, no spurious alert."""
+    calendar = _seed(conn)
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent,
+                     now=_now_at(calendar[-1]) + timedelta(days=30))
+    assert code == 0 and rep.status == "ok"
+    assert any("staleness gate skipped" in w for w in rep.warnings)
+    assert not any("WSTRZYMANE" in c for c in sent)
 
 
 def test_coverage_gate_refuses_partial_ingest(conn):
@@ -163,13 +174,92 @@ def test_config_change_refused_then_accepted(conn):
     assert any("config change accepted" in w for w in rep.warnings)
 
 
-def test_catchup_cap_refuses_big_gaps(conn):
+def test_catchup_cap_refuses_big_gaps_and_alerts(conn):
     calendar = _seed(conn)
     _run(conn, calendar=calendar, day=calendar[0],
          bt_cfg=_bt_cfg(catchup_max_sessions=5))
-    code, rep = _run(conn, calendar=calendar,
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent,
                      bt_cfg=_bt_cfg(catchup_max_sessions=5))
     assert code == 2 and "catchup_max_sessions" in rep.reason
+    assert any("WSTRZYMANE" in c for c in sent)  # refusals page the operator
+
+
+def test_config_change_refusal_alerts(conn):
+    calendar = _seed(conn)
+    _run(conn, calendar=calendar, day=calendar[-2])
+    changed = _strategy()
+    changed["risk"]["risk_per_trade"] = 0.02
+    sent = []
+    code, rep = _run(conn, calendar=calendar, strategy_cfg=changed, sent=sent)
+    assert code == 2
+    assert any("WSTRZYMANE" in c for c in sent)
+
+
+def test_universe_change_requires_acknowledgement(conn):
+    """The config hash pins the tradable universe, not just strategy/costs."""
+    calendar = _seed(conn)
+    _run(conn, calendar=calendar, day=calendar[-2])
+    grown = _universe(("aaa", "bbb", "ccc"))
+    code, rep = _run(conn, calendar=calendar, universe=grown)
+    assert code == 2 and "config changed" in rep.reason
+
+
+def test_unconfigured_telegram_keeps_cards_queued(conn):
+    """send_text's token-less dry-run ({'sent': False}) must NOT consume the
+    at-least-once queue — a misconfigured cron stays recoverable."""
+    calendar = _seed(conn)
+
+    def unconfigured(text):
+        return {"mode": "dry-run", "sent": False, "card": text}
+
+    code, rep = loop.run_signals(conn, universe=_universe(), bt_cfg=_bt_cfg(),
+                                 strategy_cfg=_strategy(),
+                                 now=_now_at(calendar[-1]),
+                                 session_end=calendar[-1].date().isoformat(),
+                                 send_fn=unconfigured)
+    assert code == 0
+    assert any("telegram not configured" in w for w in rep.warnings)
+    assert conn.execute("SELECT COUNT(*) FROM paper_orders"
+                        " WHERE signal_alerted_at IS NULL").fetchone()[0] == 2
+    # once configured, the backlog delivers
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent)
+    assert code == 0 and len(sent) == 2
+    assert conn.execute("SELECT COUNT(*) FROM paper_orders"
+                        " WHERE signal_alerted_at IS NULL").fetchone()[0] == 0
+
+
+def test_corporate_action_rebases_pending_order(conn):
+    """A split with ex-date on the fill day rescales the in-flight order
+    (qty x ratio, stop / ratio) before it executes — same as the engine."""
+    calendar = _seed(conn)
+    code, rep = _run(conn, calendar=calendar, day=calendar[-2])
+    assert code == 0
+    orders = conn.execute(
+        "SELECT o.id, o.qty, o.stop_price, o.instrument_id FROM paper_orders o"
+        " JOIN instruments i ON i.id = o.instrument_id WHERE i.ticker='aaa'"
+    ).fetchall()
+    assert len(orders) == 1
+    qty0, stop0 = int(orders[0]["qty"]), float(orders[0]["stop_price"])
+    conn.execute(
+        "INSERT INTO corporate_actions (instrument_id, action_type, ex_date,"
+        " value_or_ratio, source) VALUES (?, 'split', ?, 2.0, 'test')",
+        (orders[0]["instrument_id"], calendar[-1].date().isoformat()))
+    conn.commit()
+    code, rep = _run(conn, calendar=calendar, day=calendar[-1])
+    assert code == 0
+    row = conn.execute("SELECT qty, stop_price, fill_qty, status FROM paper_orders"
+                       " WHERE id = ?", (orders[0]["id"],)).fetchone()
+    assert row["status"] == "FILLED"
+    assert int(row["qty"]) == 2 * qty0
+    assert float(row["stop_price"]) == pytest.approx(stop0 / 2.0)
+    assert int(row["fill_qty"]) == 2 * qty0
+    pos = conn.execute(
+        "SELECT p.qty, p.stop_price FROM positions p JOIN instruments i"
+        " ON i.id = p.instrument_id WHERE i.ticker='aaa' AND p.status='OPEN'"
+    ).fetchone()
+    assert int(pos["qty"]) == 2 * qty0
 
 
 def test_catchup_equals_daily_runs(conn):

@@ -277,8 +277,10 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     stop_price        REAL,             -- initial ATR stop (BUY orders)
     decision_date     TEXT NOT NULL,    -- session whose close produced the signal
     features_json     TEXT NOT NULL,    -- feature snapshot at decision time
+    -- REQUEUED = a volume-capped zero fill; the retry lives in a FRESH row so
+    -- ascending ids always encode the engine's settlement order exactly.
     status            TEXT NOT NULL DEFAULT 'PENDING'
-                      CHECK (status IN ('PENDING', 'FILLED', 'PARTIAL', 'LAPSED')),
+                      CHECK (status IN ('PENDING', 'FILLED', 'PARTIAL', 'LAPSED', 'REQUEUED')),
     decision_id       INTEGER REFERENCES decisions(id),  -- linked at fill time
     fill_date         TEXT,
     fill_qty          INTEGER,

@@ -276,6 +276,37 @@ def test_failed_alert_is_retried_next_run(conn):
                         " WHERE signal_alerted_at IS NULL").fetchone()[0] == 0
 
 
+def test_catchup_does_not_send_stale_signal_cards(conn):
+    """An order created at S and settled at S+1 within one catch-up run must
+    not get a 'fills at next session' card after it already filled."""
+    calendar = _seed(conn)
+    _run(conn, calendar=calendar, day=calendar[-4])
+    sent = []
+    code, rep = _run(conn, calendar=calendar, day=calendar[-1], sent=sent,
+                     bt_cfg=_bt_cfg(catchup_max_sessions=10))
+    assert code == 0 and len(rep.sessions) == 3
+    filled = conn.execute(
+        "SELECT COUNT(*) FROM paper_orders WHERE status='FILLED'").fetchone()[0]
+    assert filled == 2  # the two entries queued at calendar[-4] settled at [-3]
+    # outcome cards were sent; no stale pending-signal card for filled orders
+    assert sum("ZREALIZOWANO" in c for c in sent) == 2
+    assert not any("Realizacja: otwarcie nastepnej sesji" in c
+                   and "KUP AAA" in c for c in sent)
+    # every order is marked signal-alerted (stale ones silently, filled or not)
+    assert conn.execute("SELECT COUNT(*) FROM paper_orders"
+                        " WHERE signal_alerted_at IS NULL").fetchone()[0] == 0
+
+
+def test_dry_run_respects_catchup_cap(conn):
+    calendar = _seed(conn)
+    _run(conn, calendar=calendar, day=calendar[0],
+         bt_cfg=_bt_cfg(catchup_max_sessions=5))
+    code, rep = _run(conn, calendar=calendar, dry_run=True,
+                     bt_cfg=_bt_cfg(catchup_max_sessions=5))
+    assert code == 2 and "catchup_max_sessions" in rep.reason
+    assert not conn.in_transaction  # refusal rolled the dry-run txn back
+
+
 def test_lag_other_than_one_is_refused(conn):
     calendar = _seed(conn)
     bt = _bt_cfg()

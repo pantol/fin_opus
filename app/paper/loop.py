@@ -222,8 +222,10 @@ def run_signals(
 
     last_settled = pd.to_datetime(state_row["last_settled_date"])
     todo = [d for d in calendar if last_settled < d <= latest]
-    if len(todo) > int(paper_cfg["catchup_max_sessions"]) and not dry_run:
-        if conn.in_transaction:
+    if len(todo) > int(paper_cfg["catchup_max_sessions"]):
+        if dry_run:
+            conn.rollback()
+        elif conn.in_transaction:
             conn.commit()  # keep bootstrap/config-ack writes
         report.reason = (f"{len(todo)} unprocessed sessions exceed "
                          f"catchup_max_sessions={paper_cfg['catchup_max_sessions']} — "
@@ -245,32 +247,51 @@ def run_signals(
     if not dry_run and conn.in_transaction:
         conn.commit()  # bootstrap/config-ack committed before per-session txns
 
-    cash = float(state_row["cash"])
-    peak_equity = float(state_row["peak_equity"])
     inst_by_ticker = {i.ticker: i for i in instruments}
     inst_by_id = {i.instrument_id: i for i in instruments}
     costs = bt_cfg["costs"]
     risk_cfg = strategy_cfg["risk"]
     atr_mult = float(risk_cfg["atr_mult_stop"])
 
-    for day in todo:
-        if not dry_run:
-            _begin_immediate(conn)
-        before = calendar[calendar < day]
-        prev_day = before[-1] if len(before) else None
-        cash, peak_equity, session = _process_session(
-            conn, day=day, prev_day=prev_day, user_id=user_id,
-            strategy_id=strategy_id, instruments=instruments,
-            inst_by_ticker=inst_by_ticker, inst_by_id=inst_by_id,
-            membership=membership, strategy_cfg=strategy_cfg, risk_cfg=risk_cfg,
-            costs=costs, atr_mult=atr_mult, cash=cash, peak_equity=peak_equity,
-            warnings=report.warnings,
-        )
-        store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
-                         last_settled_date=day.date().isoformat())
-        if not dry_run:
-            conn.commit()
-        report.sessions.append(session)
+    try:
+        for day in todo:
+            if not dry_run:
+                _begin_immediate(conn)
+            # Re-read state INSIDE the write lock: two overlapping runs (cron
+            # double-fire) both computed `todo` up front; BEGIN IMMEDIATE
+            # serializes them, and this check makes the loser skip sessions the
+            # winner already settled instead of double-processing them (which
+            # would fill freshly-queued orders on their own decision day).
+            fresh = store.load_state(conn, user_id)
+            if pd.to_datetime(fresh["last_settled_date"]) >= day:
+                if not dry_run:
+                    conn.commit()
+                report.warnings.append(
+                    f"session {day.date().isoformat()} already settled by a "
+                    "concurrent run — skipped")
+                continue
+            cash = float(fresh["cash"])
+            peak_equity = float(fresh["peak_equity"])
+            before = calendar[calendar < day]
+            prev_day = before[-1] if len(before) else None
+            cash, peak_equity, session = _process_session(
+                conn, day=day, prev_day=prev_day, user_id=user_id,
+                strategy_id=strategy_id, instruments=instruments,
+                inst_by_ticker=inst_by_ticker, inst_by_id=inst_by_id,
+                membership=membership, strategy_cfg=strategy_cfg, risk_cfg=risk_cfg,
+                costs=costs, atr_mult=atr_mult, cash=cash, peak_equity=peak_equity,
+                warnings=report.warnings,
+            )
+            store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
+                             last_settled_date=day.date().isoformat())
+            if not dry_run:
+                conn.commit()
+            report.sessions.append(session)
+    except BaseException:
+        # a failed session must never commit half-written money state; prior
+        # sessions are already committed, so a re-run resumes exactly here
+        conn.rollback()
+        raise
 
     if dry_run:
         conn.rollback()
@@ -561,7 +582,11 @@ def _flush_alerts(conn, user_id: str, send_fn, report: PaperRunReport) -> None:
             store.mark_outcome_alerted(conn, row["id"])
             conn.commit()
         for row in store.unalerted_signals(conn, user_id):
-            send_fn(telegram.format_order_signal_pl(dict(row)))
+            # During a multi-session catch-up an order created at S is already
+            # settled at S+1 by flush time — a "fills at next session" card
+            # would be stale noise; its outcome card (above) tells the story.
+            if row["status"] == "PENDING":
+                send_fn(telegram.format_order_signal_pl(dict(row)))
             store.mark_signal_alerted(conn, row["id"])
             conn.commit()
         if report.sessions:

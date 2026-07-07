@@ -86,15 +86,38 @@ def _alive(inst: Instrument, day: pd.Timestamp) -> bool:
     return True
 
 
-def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[Instrument], pd.Series]:
-    """Load tradable instruments (restricted to the universe config) + benchmark.
+# An archive-discovered instrument whose bars stopped printing this many
+# calendar days (~15 sessions) before the market's last stored session is
+# treated as delisted on its last bar — without this, _alive would keep dead
+# tickers as entry candidates forever, evaluated on stale feature snapshots.
+FULL_MARKET_DELIST_GAP_DAYS = 21
 
-    Only tickers listed under `universe["instruments"]` are traded; this prevents
-    a reused SQLite DB from trading stale or out-of-config tickers.
+
+def load_instruments(conn, universe: dict, benchmark_ticker: str,
+                     *, mode: str = "config") -> tuple[list[Instrument], pd.Series]:
+    """Load tradable instruments + benchmark.
+
+    mode="config" (default): only tickers under `universe["instruments"]` are
+    traded. That hand-maintained list is inevitably survivorship-biased — it
+    names companies known and alive TODAY — so it is a demo subset, fine for
+    the paper loop's small book but not for honest backtest evidence.
+
+    mode="full_market": every ingested non-index instrument is tradable — the
+    anti-survivorship universe from the GPW archive backfill (dead companies
+    included, keyed ticker=isin). Archive-discovered rows carry no listing
+    metadata, so `delisted_on` is derived from the last observed bar when the
+    instrument stopped printing well before the market's last session (rule 3).
     """
+    if mode not in ("config", "full_market"):
+        raise ValueError(f"unknown universe mode: {mode!r}")
     bench_close = _load_close_series(conn, benchmark_ticker)
 
     allowed = {i["ticker"].lower() for i in universe.get("instruments", [])}
+    market_last = None
+    if mode == "full_market":
+        row = conn.execute(
+            "SELECT MAX(date) AS d FROM prices WHERE adjusted = 0").fetchone()
+        market_last = pd.to_datetime(row["d"]) if row and row["d"] else None
 
     instruments: list[Instrument] = []
     rows = conn.execute(
@@ -104,11 +127,16 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
     for r in rows:
         if r["is_index"]:
             continue  # indices are not traded
-        if r["ticker"].lower() not in allowed:
+        if mode != "full_market" and r["ticker"].lower() not in allowed:
             continue  # not part of the configured universe
         df = compute.load_prices_asof(conn, r["id"], as_of="9999-12-31")
         if df.empty:
             continue
+        delisted_on = r["delisted_on"]
+        if (mode == "full_market" and delisted_on is None and market_last is not None
+                and df.index[-1]
+                < market_last - pd.Timedelta(days=FULL_MARKET_DELIST_GAP_DAYS)):
+            delisted_on = df.index[-1].date().isoformat()
         actions = _load_actions_map(conn, r["id"])
         feats = build_features(df, actions, bench_for_features)
         instruments.append(
@@ -117,7 +145,7 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
                 ticker=r["ticker"],
                 sector=r["sector"],
                 listed_from=r["listed_from"],
-                delisted_on=r["delisted_on"],
+                delisted_on=delisted_on,
                 prices=df,
                 features=feats,
                 actions=actions,

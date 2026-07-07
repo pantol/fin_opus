@@ -160,10 +160,17 @@ def cmd_backtest(args) -> int:
     )
 
     bench = universe["benchmark"]["ticker"]
-    instruments, bench_close = engine.load_instruments(conn, universe, bench)
+    universe_mode = (bt_cfg.get("universe") or {}).get("mode", "config")
+    instruments, bench_close = engine.load_instruments(conn, universe, bench,
+                                                       mode=universe_mode)
     if not instruments:
         print("No price data. Run `make ingest` first.")
         return 1
+    if universe_mode != "full_market":
+        print("WARNING: universe.mode=config — trading the hand-picked "
+              "universe.yaml list, a survivorship-biased DEMO subset (it names "
+              "today's winners). For honest evidence set universe.mode: "
+              "full_market on a `make backfill` database.")
 
     # If the strategy gates on any llm_* feature, attach point-in-time LLM
     # features (materialized earlier; read deterministically, NO LLM call).
@@ -188,6 +195,9 @@ def cmd_backtest(args) -> int:
           f"(strategy: {strat['name']} v{strat['version']})...")
     result = engine.run_walk_forward(instruments, bench_close, strat, bt_cfg,
                                      membership=membership)
+    # recorded into the trials registry: full-market and demo-subset runs are
+    # different experiments and must never masquerade as each other
+    result.metrics["universe_mode"] = universe_mode
     if result.fill_anomalies:
         n_lapsed = sum(1 for a in result.fill_anomalies
                        if a["type"] == "order_lapsed_no_bar")

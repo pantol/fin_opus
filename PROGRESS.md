@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 272 passing.
+ZERO LLM in the money path. **Tests:** 283 passing.
 
 ---
 
@@ -89,6 +89,31 @@ ZERO LLM in the money path. **Tests:** 272 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-07 — Backtest-fidelity fixes A1–A4 (review findings)
+Four compounding measurement biases removed; every "vs WIG20TR" number
+before this date is partly a measurement artifact. Suite **283 passing**.
+- **A1 — corporate actions:** `config/corporate_actions.yaml` now carries the
+  two data-confirmed 1:10 splits (PZU 2015-11-30, DNP 2025-07-31);
+  `engine.build_features` computes features on an in-memory back-adjusted
+  series (PIT-safe; close/ATR rescaled to raw execution units) so splits no
+  longer read as −90% returns or fire ATR stops; `make backtest` warns on
+  fixture/table drift and unexplained jumps, and notes the missing-dividends
+  bias (price-return portfolio vs total-return benchmark) until dividends load.
+- **A2 — universe:** `universe.mode: full_market` trades the whole ingested
+  market (dead tickers included, delistings derived from last printed bar);
+  config mode is labeled the survivorship-biased demo subset it is, and the
+  mode is recorded in the trials registry.
+- **A3 — benchmark:** no more `.bfill()` fabricating flat pre-2004 WIG20TR
+  history; the measured span clamps to the benchmark's first bar and the
+  clamp is flagged in metrics.
+- **A4 — marking:** suspended names mark at last known close (zero only after
+  delisting) in `build_day_state` — shared by engine AND paper loop — and in
+  the MC benchmark; no more phantom drawdowns tripping the circuit breaker
+  or freeing exposure caps.
+- **Real-data gate rerun:** strategy measures total return −24% / DSR 0.003 /
+  MC percentile 0.02 vs WIG20TR +91% — honestly worse than random; the prior
+  "≈ −2% vs +147%" was partly measurement artifact. README updated.
 
 ### 2026-07-06 — Daily paper-trading loop (`make signals`)
 Completes the Phase-1 blueprint gate ("paper trading 1 strategy vs WIG →

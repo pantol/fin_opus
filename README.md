@@ -489,11 +489,18 @@ to the console. The notifier is output-only and never part of the decision path.
 
 ## Current status (honest)
 
-First full-history real-data run (2015→2026, walk-forward OOS from 2017):
-`trend_momentum` as shipped is roughly flat (total return ≈ −2%, maxDD −26%)
-vs **WIG20TR +147%** — much lower drawdown, far lower return. The plumbing is
-sound; the strategy has no proven edge yet. The A/B LLM comparison needs weeks
-of collected filings before it can say anything (RSS has no backfill).
+After the backtest-fidelity fixes (corporate-action-aware features, benchmark
+clamped to its real history, suspended names stale-marked instead of
+zero-marked), the real-data walk-forward run measures `trend_momentum` as
+shipped at **total return −24%, CAGR −3.3%, maxDD −27%** vs **WIG20TR +91%**
+over the same measured span — DSR 0.003 and percentile 0.02 vs cost-matched
+random entries, i.e. *worse than random*. Earlier, prettier numbers (≈ −2% vs
++147%) came partly from measurement artifacts those fixes removed. The
+plumbing is sound; the strategy has no edge. Two known conservative biases
+remain: no dividends loaded (price-return portfolio vs a total-return
+benchmark) and the hand-picked demo universe (run `universe.mode: full_market`
+on a backfilled DB for honest evidence). The A/B LLM comparison still needs
+weeks of collected filings before it can say anything (RSS has no backfill).
 
 ## Seams for later phases (not built yet)
 

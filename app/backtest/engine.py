@@ -197,8 +197,11 @@ def _back_adjust_df(df: pd.DataFrame, actions: dict[str, list[dict]]) -> pd.Data
     price_cols = ["open", "high", "low", "close"]
     for ex_date in sorted(actions):
         ex = pd.to_datetime(ex_date)
-        prior = df.index[df.index < ex]
-        close_before = float(df.at[prior[-1], "close"]) if len(prior) else None
+        # last NON-NaN close strictly before the ex-date (NULL closes exist in
+        # the DB; a NaN here would zero every pre-ex bar via the dividend
+        # factor and wipe the whole pre-ex feature history)
+        prior_closes = df.loc[df.index < ex, "close"].dropna()
+        close_before = float(prior_closes.iloc[-1]) if len(prior_closes) else None
         for action in actions[ex_date]:
             factor = refdata.price_factor(
                 {"action_type": action["action_type"],
@@ -355,6 +358,28 @@ def run_backtest(
                 continue
             for action in actions_in_window(inst, prev_day, day):
                 apply_action_to_order(order, action)
+
+        # --- 0b. write off positions held into a delisting ---------------------
+        # _mark_price already values a delisted position at zero; realize that
+        # loss in the trade ledger too, free the max_open_positions slot, and
+        # leave an auditable EXIT record (rule 8). Without this, a zombie
+        # position blocked the book forever while win_rate/profit_factor never
+        # saw the -100% — eight delistings-while-held would silently halt all
+        # new entries for the rest of a full-market run.
+        for tk, pos in list(positions.items()):
+            inst = inst_by_ticker[tk]
+            if _alive(inst, day):
+                continue
+            trade_pnls.append((0.0 - pos.entry_price) * pos.qty)
+            decisions_log.append({
+                "action": "EXIT", "ticker": tk, "instrument_id": inst.instrument_id,
+                "decision_date": day.date().isoformat(),
+                "fill_date": day.date().isoformat(),
+                "qty": pos.qty, "price": 0.0, "fee": 0.0, "slippage": 0.0,
+                "features": {"forced": "delisted_write_off"},
+                "cash_delta": 0.0,
+            })
+            del positions[tk]
 
         # --- 1. execute pending orders scheduled for today (next-bar fills) ---
         # Cash is mutated ATOMICALLY here (before mark-to-market), so the equity
@@ -880,11 +905,15 @@ def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, dec
 def _benchmark_buy_and_hold(bench_close: pd.Series, index: pd.DatetimeIndex, capital: float) -> pd.Series:
     if bench_close is None or bench_close.empty:
         return pd.Series([capital] * len(index), index=index, dtype=float)
-    # ffill only: back-filling would fabricate a flat zero-return benchmark
-    # segment out of FUTURE values for dates before the index's first real bar,
-    # silently understating WIG20TR. run_backtest clamps the calendar to the
-    # benchmark's availability, so a leading NaN here is a caller bug.
-    aligned = bench_close.reindex(index).ffill()
+    # As-of alignment (reindex with method="ffill" reads benchmark bars BEFORE
+    # the span's first session too, so a one-day benchmark gap on the first
+    # calendar session is filled from the past, never from the future). Plain
+    # back-filling would fabricate a flat zero-return benchmark segment out of
+    # FUTURE values, silently understating WIG20TR. run_backtest clamps the
+    # calendar to the benchmark's availability, so a leading NaN — possible
+    # only when the span truly precedes the first benchmark bar — is a caller
+    # bug.
+    aligned = bench_close.reindex(index, method="ffill")
     if len(aligned) and pd.isna(aligned.iloc[0]):
         raise ValueError(
             "benchmark history starts after the requested span — clamp the "

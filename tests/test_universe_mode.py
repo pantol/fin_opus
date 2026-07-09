@@ -73,6 +73,31 @@ def test_full_market_derives_delisting_from_last_bar(conn):
     assert by_ticker["aaa"].listed_from == "2018-01-01"
 
 
+def test_delist_gap_boundary(conn):
+    """Pin both sides of FULL_MARKET_DELIST_GAP_DAYS: a short pause is a
+    suspension (stale mark, still tradable), a long one is a delisting."""
+    n = 300
+    _ingest(conn, "wig20tr", synthetic_series(n=n, base=2000, drift=0.0),
+            is_index=True)
+    _ingest(conn, "aaa", synthetic_series(n=n, base=100, drift=0.0),
+            sector="tech", listed_from="2018-01-01")
+    full = synthetic_series(n=n, base=40, drift=0.0)
+    _ingest(conn, "plnear0000001", full[:-5])    # ~7 calendar days of silence
+    _ingest(conn, "plfar00000001", full[:-20])   # ~28 calendar days of silence
+    conn.commit()
+    instruments, _ = engine.load_instruments(conn, _universe(), "wig20tr",
+                                             mode="full_market")
+    by_ticker = {i.ticker: i for i in instruments}
+    market_last = max(i.prices.index[-1] for i in instruments)
+    gap = pd.Timedelta(days=engine.FULL_MARKET_DELIST_GAP_DAYS)
+    # fixture sanity: the two names genuinely sit on opposite sides of the cut
+    assert market_last - by_ticker["plnear0000001"].prices.index[-1] <= gap
+    assert market_last - by_ticker["plfar00000001"].prices.index[-1] > gap
+    assert by_ticker["plnear0000001"].delisted_on is None       # suspension
+    assert by_ticker["plfar00000001"].delisted_on == \
+        by_ticker["plfar00000001"].prices.index[-1].date().isoformat()
+
+
 def test_dead_archive_ticker_is_written_off_in_marking(conn):
     """The derived delisting date feeds the A4 write-off convention."""
     _seed(conn)

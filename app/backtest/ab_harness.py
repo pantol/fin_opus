@@ -99,15 +99,18 @@ def run_ab(
     *,
     benchmark_ticker: str | None = None,
     membership: dict[int, list[tuple]] | None = None,
+    universe_mode: str = "config",
 ) -> ABReport:
     """Run baseline vs baseline+LLM walk-forward OOS and build a comparison report.
 
-    `membership` must match what `make backtest` uses (same point-in-time
-    universe gate), otherwise the A/B verdict describes a different universe
-    than the production backtest.
+    `membership` and `universe_mode` must match what `make backtest` uses (same
+    point-in-time universe gate, same instrument set), otherwise the A/B
+    verdict describes a different universe than the production backtest — and
+    the trials registry would file both under the same config hash.
     """
     bench_ticker = benchmark_ticker or universe["benchmark"]["ticker"]
-    instruments, bench_close = engine.load_instruments(conn, universe, bench_ticker)
+    instruments, bench_close = engine.load_instruments(conn, universe, bench_ticker,
+                                                       mode=universe_mode)
 
     base_res = engine.run_walk_forward(
         instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,

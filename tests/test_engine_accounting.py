@@ -198,6 +198,45 @@ def test_equity_is_continuous_across_a_suspension(conn):
         assert abs(res.equity_curve[d] - before) < 0.01 * before
 
 
+def test_position_held_into_delisting_is_written_off(conn):
+    """A held name that delists realizes its -100% in the trade ledger and
+    frees the max_open_positions slot — no zombie positions blocking the book
+    while win_rate/profit_factor never see the loss."""
+    n = 60
+    rows = synthetic_series(n=n, base=100, drift=0.0)
+    _ingest(conn, "wig20tr", synthetic_series(n=n, base=2000, drift=0.0),
+            is_index=True)
+    _ingest(conn, "dead", rows[:30], sector="x", listed_from="2015-01-01",
+            delisted_on=rows[29][0])
+    _ingest(conn, "live", synthetic_series(n=n, base=50, drift=0.0), sector="y",
+            listed_from="2015-01-01")
+    conn.commit()
+    uni = {"benchmark": {"ticker": "wig20tr", "is_index": True}, "indices": [],
+           "instruments": [{"ticker": "dead", "sector": "x"},
+                           {"ticker": "live", "sector": "y"}]}
+    strat = {
+        "name": "toy", "version": 1,
+        "entry": {"all": [{"feature": "close", "op": "gt", "value": 0.0}]},
+        "exit": {"any": [{"feature": "close", "op": "lt", "value": 0.0}]},
+        "risk": {**cfg.load_strategy("trend_momentum")["risk"],
+                 "max_open_positions": 1},
+    }
+    instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
+    res = engine.run_backtest(instruments, bench, strat,
+                              cfg.load_backtest_config())
+
+    write_offs = [d for d in res.decisions
+                  if d["action"] == "EXIT" and d["price"] == 0.0]
+    assert [d["ticker"] for d in write_offs] == ["dead"]
+    assert write_offs[0]["features"] == {"forced": "delisted_write_off"}
+    assert min(res.trade_pnls) < 0  # the -100% reached the trade statistics
+    # the freed slot lets 'live' enter AFTER the delisting (max_open_positions=1)
+    live_entries = [d for d in res.decisions
+                    if d["ticker"] == "live" and d["action"] == "ENTER"]
+    assert live_entries, "write-off must free the book slot"
+    assert live_entries[0]["fill_date"] > rows[29][0]
+
+
 def test_no_duplicate_pending_buys_for_same_ticker(conn):
     """With lag>1, the same ticker must not be queued twice before filling."""
     _seed(conn)

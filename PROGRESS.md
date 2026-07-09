@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 283 passing.
+ZERO LLM in the money path. **Tests:** 289 passing.
 
 ---
 
@@ -90,9 +90,31 @@ ZERO LLM in the money path. **Tests:** 283 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-07 — A1–A4 hardening pass (adversarial review of the branch)
+A 3-dimension review of the fidelity branch confirmed 16 findings; all fixed:
+- **A5 landed early — delisting write-off:** a position held into a delisting
+  is now force-written-off (EXIT at 0.0 in decisions/trades, loss in
+  trade_pnls, `max_open_positions` slot freed) in BOTH the engine and the
+  paper loop; previously a zombie position blocked the book forever and its
+  −100% never reached win_rate/profit_factor. Parity fixture now delists a
+  held name.
+- **A/B honesty:** `cmd_ab`/`run_ab` now honor `universe.mode` and tag
+  `universe_mode` in metrics — a full-market backtest and a demo-subset A/B
+  can no longer collide under the same trials-registry hash.
+- **Benchmark as-of alignment:** a one-day benchmark gap on the span's first
+  session fills from the PAST (reindex method="ffill") instead of crashing.
+- **build_features robustness:** NaN close before an ex-date no longer zeroes
+  the pre-ex history; dividend/stacked-action/rel_strength paths + the
+  raw-unit rescale are now pinned by tests (mutation-verified).
+- **Fidelity warnings:** YAML/table sync compares CONTENT (not counts) and
+  names not-ingested tickers; the jump scan covers the full market in
+  full_market mode; stale tickers (bars stopped, no delisted_on) are flagged.
+- **LLM quant context** (`cmd_llm`) uses the action-aware panel — the LLM is
+  no longer fed a split gap as −90% momentum.
+
 ### 2026-07-07 — Backtest-fidelity fixes A1–A4 (review findings)
 Four compounding measurement biases removed; every "vs WIG20TR" number
-before this date is partly a measurement artifact. Suite **283 passing**.
+before this date is partly a measurement artifact. Suite **289 passing**.
 - **A1 — corporate actions:** `config/corporate_actions.yaml` now carries the
   two data-confirmed 1:10 splits (PZU 2015-11-30, DNP 2025-07-31);
   `engine.build_features` computes features on an in-memory back-adjusted

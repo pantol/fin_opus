@@ -189,7 +189,7 @@ def cmd_backtest(args) -> int:
         conn.close()
         return 1
 
-    _warn_data_fidelity(conn, universe)
+    _warn_data_fidelity(conn, universe, universe_mode)
 
     print(f"Running walk-forward backtest on {len(instruments)} instruments "
           f"(strategy: {strat['name']} v{strat['version']})...")
@@ -281,10 +281,14 @@ def cmd_llm(args) -> int:
         inst_id = int(row["id"])
 
         # Deterministic quant context (point-in-time; passed as text only).
+        # Corporate-action-aware, same as the engine/paper feature panel — the
+        # LLM must not be fed a split gap as a -90% momentum.
         quant_score = None
         prices = compute.load_prices_asof(conn, inst_id, as_of)
         if not prices.empty:
-            snap = compute.features_at(compute.compute_features(prices), as_of)
+            feats = engine.build_features(
+                prices, engine._load_actions_map(conn, inst_id), None)
+            snap = compute.features_at(feats, as_of)
             if snap:
                 quant_score = snap.get("momentum_6m")
 
@@ -465,31 +469,72 @@ def _validate_run(conn, strategy_cfg, bt_cfg, result, instruments, membership,
     return "\n".join(lines), dsr, mc
 
 
-def _warn_data_fidelity(conn, universe) -> None:
+def _warn_data_fidelity(conn, universe, universe_mode: str = "config") -> None:
     """Loud pre-run warnings for known result-corrupting data states.
 
     A backtest silently run on top of these produces numbers that LOOK fine
-    and are wrong — the operator must see it before reading the metrics.
+    and are wrong — the operator must see it before reading the metrics. In
+    full_market mode the scan covers every instrument the run actually trades,
+    not just the universe.yaml subset.
     """
+    # corporate_actions fixture vs table: compare CONTENT, not row counts —
+    # editing an ex-date/ratio without rerunning refdata must not pass silently
     yaml_actions = cfg.load_corporate_actions().get("actions") or []
-    n_table = conn.execute("SELECT COUNT(*) FROM corporate_actions").fetchone()[0]
-    if len(yaml_actions) != n_table:
-        print(f"WARNING: corporate_actions table ({n_table} rows) is out of sync "
-              f"with config/corporate_actions.yaml ({len(yaml_actions)} entries) — "
-              "run `python -m app.cli refdata` first, or split/dividend gaps "
-              "will corrupt features and fire ATR stops as market moves.")
+    yaml_set = set()
+    unknown_tickers = set()
+    for a in yaml_actions:
+        tk = str(a["ticker"]).lower()
+        row = conn.execute("SELECT id FROM instruments WHERE ticker = ?", (tk,)).fetchone()
+        if row is None:
+            unknown_tickers.add(tk)
+            continue
+        yaml_set.add((tk, a["action_type"], str(a["ex_date"]),
+                      float(a["value_or_ratio"])))
+    table_set = {
+        (r["ticker"], r["action_type"], r["ex_date"], float(r["value_or_ratio"]))
+        for r in conn.execute(
+            "SELECT i.ticker, c.action_type, c.ex_date, c.value_or_ratio"
+            " FROM corporate_actions c JOIN instruments i ON i.id = c.instrument_id")
+    }
+    if yaml_set != table_set:
+        print("WARNING: corporate_actions table content differs from "
+              "config/corporate_actions.yaml — run `python -m app.cli refdata` "
+              "first, or split/dividend gaps will corrupt features and fire "
+              "ATR stops as market moves.")
+    if unknown_tickers:
+        print(f"NOTE: corporate_actions.yaml entries for tickers not in this DB: "
+              f"{', '.join(sorted(unknown_tickers))} — ingest them, or ignore if "
+              "they are outside this database's universe.")
     if not any(a.get("action_type") == "dividend" for a in yaml_actions):
         print("NOTE: no dividends loaded in config/corporate_actions.yaml — the "
               "simulated portfolio earns PRICE return while WIG20TR is TOTAL "
               "return (a known conservative bias in every benchmark comparison).")
+
     from app.ingestion import quality
-    report = quality.run_checks(conn, universe, cfg.load_data_quality())
+    scan_universe = universe
+    scan_label = "universe.yaml subset"
+    if universe_mode == "full_market":
+        # scan what the run actually trades: every ingested non-index name
+        rows = conn.execute(
+            "SELECT ticker FROM instruments WHERE is_index = 0").fetchall()
+        scan_universe = {"instruments": [{"ticker": r["ticker"]} for r in rows]}
+        scan_label = "full market"
+    report = quality.run_checks(conn, scan_universe, cfg.load_data_quality())
     jumps = [i for i in report.issues if i.category == "unexplained_jump"]
     if jumps:
         print(f"WARNING: {len(jumps)} instrument(s) with unexplained price jumps "
-              "(see `make check-data`) — likely missing corporate actions; "
-              "momentum/SMA/ATR and stop logic are corrupted around them:")
+              f"(scanned: {scan_label}; see `make check-data`) — likely missing "
+              "corporate actions; momentum/SMA/ATR and stop logic are corrupted "
+              "around them:")
         for issue in jumps[:5]:
+            print(f"  {issue.ticker}: {issue.detail}")
+    stale = [i for i in report.issues if i.category == "stale_ticker"]
+    if stale:
+        print(f"WARNING: {len(stale)} ticker(s) stopped printing bars without a "
+              "delisted_on date — a held position would carry its last close as "
+              "a stale mark indefinitely; set delisted_on in universe.yaml (or "
+              "confirm the name is merely suspended):")
+        for issue in stale[:5]:
             print(f"  {issue.ticker}: {issue.detail}")
 
 
@@ -640,7 +685,13 @@ def cmd_ab(args) -> int:
     baseline = cfg.load_strategy(args.baseline)
     llm = cfg.load_strategy(args.llm)
 
-    instruments, _ = engine.load_instruments(conn, universe, universe["benchmark"]["ticker"])
+    # Same universe mode as cmd_backtest: the trials registry hashes the whole
+    # universe config block, so an A/B run simulating a different instrument
+    # set under the same hash would corrupt the DSR statistics.
+    universe_mode = (bt_cfg.get("universe") or {}).get("mode", "config")
+    instruments, _ = engine.load_instruments(conn, universe,
+                                             universe["benchmark"]["ticker"],
+                                             mode=universe_mode)
     if not instruments:
         print("No price data. Run `make ingest` first.")
         return 1
@@ -652,9 +703,12 @@ def cmd_ab(args) -> int:
         return 1
 
     print(f"A/B: baseline='{baseline['name']}' vs llm='{llm['name']}' "
-          f"on {len(instruments)} instruments (OOS, realistic costs)...")
+          f"on {len(instruments)} instruments (OOS, realistic costs, "
+          f"universe mode: {universe_mode})...")
     report = ab_harness.run_ab(conn, universe, baseline, llm, bt_cfg,
-                               membership=membership)
+                               membership=membership, universe_mode=universe_mode)
+    report.baseline_result.metrics["universe_mode"] = universe_mode
+    report.llm_result.metrics["universe_mode"] = universe_mode
 
     # Anti-luck gates on the CANDIDATE (the LLM variant): the deltas gate alone
     # cannot tell luck from edge (Pack C). Both trials land in the registry.

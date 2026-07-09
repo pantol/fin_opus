@@ -70,3 +70,17 @@ def test_benchmark_helper_refuses_leading_gap():
     span = pd.DatetimeIndex(["2020-01-01", "2020-01-10", "2020-01-11"])
     with pytest.raises(ValueError, match="benchmark history starts after"):
         engine._benchmark_buy_and_hold(bench, span, 100000.0)
+
+
+def test_benchmark_gap_on_first_session_fills_as_of():
+    """A benchmark bar missing ON the span's first session is filled from the
+    PAST (as-of), not treated as a caller bug — a one-day index-feed gap must
+    not crash the run, and never reads future values."""
+    bench = pd.Series(
+        [100.0, 102.0, 103.0],
+        index=pd.DatetimeIndex(["2020-01-01", "2020-01-03", "2020-01-04"]))
+    span = pd.DatetimeIndex(["2020-01-02", "2020-01-03", "2020-01-04"])
+    curve = engine._benchmark_buy_and_hold(bench, span, 100000.0)
+    assert not curve.isna().any()
+    assert curve.iloc[0] == pytest.approx(100000.0)          # as-of 100, not 102
+    assert curve.iloc[1] == pytest.approx(102000.0)

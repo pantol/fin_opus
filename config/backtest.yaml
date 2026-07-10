@@ -33,8 +33,17 @@ validation:
 # wig20), NEW entries are only evaluated for instruments that are members as
 # of T per the index_membership table (`python -m app.cli refdata` loads it).
 # null = trade the full universe.yaml list (default; membership not consulted).
+#
+# mode:
+#   config      — trade only the hand-picked universe.yaml list. That list is
+#                 survivorship-biased BY CONSTRUCTION (it names companies known
+#                 and alive today); treat its results as demo evidence only.
+#   full_market — trade every ingested instrument, dead tickers included
+#                 (anti-survivorship; needs the `make backfill` full-market
+#                 data; delisting dates derived from the last printed bar).
 universe:
   index: null
+  mode: config
 
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)

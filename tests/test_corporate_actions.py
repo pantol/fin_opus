@@ -322,3 +322,132 @@ def test_derive_adjusted_series_writes_adjusted_rows_only_with_actions(conn):
         "SELECT close FROM prices WHERE instrument_id=? AND adjusted=1 ORDER BY date LIMIT 1",
         (iid,)).fetchone()
     assert row["close"] == pytest.approx(95.0)
+
+
+def _split_frame(n=120, ex_at=80, factor=0.5, base=100):
+    """Raw frame with a mechanical price scaling from bar `ex_at` onward."""
+    rows = _flat_rows(n, base)
+    raw = [(d,
+            o * (factor if i >= ex_at else 1.0),
+            h * (factor if i >= ex_at else 1.0),
+            l * (factor if i >= ex_at else 1.0),
+            c * (factor if i >= ex_at else 1.0), v)
+           for i, (d, o, h, l, c, v) in enumerate(rows)]
+    df = pd.DataFrame(
+        {"open": [r[1] for r in raw], "high": [r[2] for r in raw],
+         "low": [r[3] for r in raw], "close": [r[4] for r in raw],
+         "volume": [r[5] for r in raw]},
+        index=pd.DatetimeIndex([r[0] for r in raw]))
+    return df, rows
+
+
+def test_build_features_bridges_split_gap():
+    """A1: features must not read a split gap as a market move.
+
+    A 2:1 split halves the raw close; on the raw panel that is a -50% "return"
+    poisoning momentum for a full lookback window and a huge true-range spike
+    poisoning ATR (so the stop distance explodes). The action-aware panel
+    bridges the gap, while close/atr/sma stay in RAW units for execution.
+    """
+    df, rows = _split_frame()
+    actions = {rows[80][0]: [{"action_type": "split", "value_or_ratio": 2.0}]}
+
+    plain = engine.compute.compute_features(df)
+    fixed = engine.build_features(df, actions, None)
+    probe = 85  # ret_1m window (21 bars) straddles the ex-date
+
+    assert plain["ret_1m"].iloc[probe] == pytest.approx(-0.5, abs=0.02)  # the bug
+    assert fixed["ret_1m"].iloc[probe] == pytest.approx(0.0, abs=0.02)   # bridged
+    # execution stays in raw units: close is the raw post-split price
+    assert fixed["close"].iloc[probe] == df["close"].iloc[probe]
+    # ATR no longer carries the mechanical gap
+    assert plain["atr"].iloc[probe] > 3.0
+    assert fixed["atr"].iloc[probe] < 2.0
+
+    # PRE-split rows pin the raw-unit rescale: the adjusted series is halved
+    # there, so without the close/atr/sma rescale these would come back in
+    # adjusted units (0.5x) — silently halving stop distances and sizing.
+    probe_pre = 60  # sma50 defined; window entirely pre-ex
+    assert fixed["close"].iloc[probe_pre] == df["close"].iloc[probe_pre]
+    assert fixed["atr"].iloc[probe_pre] == pytest.approx(plain["atr"].iloc[probe_pre])
+    assert fixed["sma50"].iloc[probe_pre] == pytest.approx(plain["sma50"].iloc[probe_pre])
+
+    # no actions -> identical to the plain panel
+    same = engine.build_features(df, None, None)
+    assert same["ret_1m"].equals(plain["ret_1m"])
+
+
+def test_build_features_bridges_dividend_and_keeps_raw_units():
+    """A dividend gap is bridged the same way; close stays the raw ex price."""
+    df, rows = _split_frame(factor=0.95)  # -5% mechanical gap at bar 80
+    actions = {rows[80][0]: [{"action_type": "dividend", "value_or_ratio": 5.0}]}
+
+    plain = engine.compute.compute_features(df)
+    fixed = engine.build_features(df, actions, None)
+    probe = 85
+
+    assert plain["ret_1m"].iloc[probe] == pytest.approx(-0.05, abs=0.01)
+    assert fixed["ret_1m"].iloc[probe] == pytest.approx(0.0, abs=0.01)
+    assert fixed["close"].iloc[probe] == df["close"].iloc[probe]
+    # pre-ex rows stay in raw units despite the dividend factor
+    assert fixed["close"].iloc[60] == df["close"].iloc[60]
+    assert fixed["atr"].iloc[60] == pytest.approx(plain["atr"].iloc[60])
+
+
+def test_build_features_stacks_actions_and_rel_strength_stays_finite():
+    """Cumulative adjustment across a split AND a dividend; rel_strength is
+    gap-free with a benchmark attached (the entry-gate feature family)."""
+    n = 160
+    rows = _flat_rows(n, 100)
+    raw = []
+    for i, (d, o, h, l, c, v) in enumerate(rows):
+        f = 1.0
+        if i >= 80:
+            f *= 0.5          # 2:1 split at bar 80
+        if i >= 130:
+            f *= 0.96         # 2 PLN dividend off the 50 PLN price at bar 130
+        raw.append((d, o * f, h * f, l * f, c * f, v))
+    df = pd.DataFrame(
+        {"open": [r[1] for r in raw], "high": [r[2] for r in raw],
+         "low": [r[3] for r in raw], "close": [r[4] for r in raw],
+         "volume": [r[5] for r in raw]},
+        index=pd.DatetimeIndex([r[0] for r in raw]))
+    actions = {rows[80][0]: [{"action_type": "split", "value_or_ratio": 2.0}],
+               rows[130][0]: [{"action_type": "dividend", "value_or_ratio": 2.0}]}
+    bench = pd.Series(2000.0, index=df.index)
+
+    fixed = engine.build_features(df, actions, bench)
+    assert fixed["ret_1m"].iloc[90] == pytest.approx(0.0, abs=0.02)   # split bridged
+    assert fixed["ret_1m"].iloc[135] == pytest.approx(0.0, abs=0.02)  # dividend bridged
+    assert fixed["ret_3m"].iloc[140] == pytest.approx(0.0, abs=0.03)  # straddles both
+    assert (fixed["close"] == df["close"]).all()                      # raw units
+    seg = fixed["rel_strength_6m"].iloc[130:150]
+    assert seg.notna().all()
+    assert seg.abs().max() < 0.05
+
+
+def test_back_adjust_skips_nan_close_before_dividend():
+    """A NULL close on the bar before an ex-date must not poison the pre-ex
+    history (the dividend factor needs the last NON-NaN cum close)."""
+    df, rows = _split_frame(factor=0.95)
+    df.iloc[79, df.columns.get_loc("close")] = float("nan")
+    actions = {rows[80][0]: [{"action_type": "dividend", "value_or_ratio": 5.0}]}
+    fixed = engine.build_features(df, actions, None)
+    pre = fixed["ret_1m"].iloc[40:75]
+    assert pre.notna().all()
+    assert pre.abs().max() < 0.05  # pre-ex history intact, not zeroed/inf
+
+
+def test_shipped_corporate_actions_fixture_loads(conn):
+    """The repo YAML (PZU + DNP 1:10 splits) loads without failures."""
+    _ingest(conn, "pzu", _flat_rows(6, 100), sector="fin")
+    _ingest(conn, "dnp", _flat_rows(6, 100), sector="retail")
+    conn.commit()
+    report = refdata.load_refdata(conn, {"indices": {}}, cfg.load_corporate_actions())
+    assert report.ok, report.failures
+    assert report.action_rows == 2
+    rows = conn.execute(
+        "SELECT i.ticker, c.action_type, c.value_or_ratio FROM corporate_actions c"
+        " JOIN instruments i ON i.id = c.instrument_id ORDER BY c.ex_date").fetchall()
+    assert [(r["ticker"], r["action_type"], r["value_or_ratio"]) for r in rows] == \
+        [("pzu", "split", 10.0), ("dnp", "split", 10.0)]

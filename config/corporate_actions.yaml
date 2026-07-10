@@ -17,6 +17,14 @@
 #   rights_issue  — theoretical ex-rights price factor in (0, 1]
 #                   (ex price ≈ cum price * factor)
 
-actions: []
+# The two splits below were flagged by `make check-data` as split-shaped -90%
+# gaps and confirmed against the raw GPW closes stored in the DB. Dividends
+# are NOT loaded yet: until they are, the simulated portfolio earns PRICE
+# return while the WIG20TR benchmark is TOTAL return — a known conservative
+# bias that `make backtest` reminds about.
+actions:
+  - {ticker: pzu, action_type: split, ex_date: 2015-11-30, value_or_ratio: 10.0,
+     source: "1:10 split (raw close 382.60 -> 38.60; flagged by make check-data)"}
+  - {ticker: dnp, action_type: split, ex_date: 2025-07-31, value_or_ratio: 10.0,
+     source: "1:10 split (raw close 502.00 -> 49.61; flagged by make check-data)"}
   # - {ticker: pkn, action_type: dividend, ex_date: 2024-06-10, value_or_ratio: 4.15, source: "ESPI 12/2024"}
-  # - {ticker: cdr, action_type: split, ex_date: 2016-07-20, value_or_ratio: 2.0, source: "placeholder"}

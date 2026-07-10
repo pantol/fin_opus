@@ -86,15 +86,38 @@ def _alive(inst: Instrument, day: pd.Timestamp) -> bool:
     return True
 
 
-def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[Instrument], pd.Series]:
-    """Load tradable instruments (restricted to the universe config) + benchmark.
+# An archive-discovered instrument whose bars stopped printing this many
+# calendar days (~15 sessions) before the market's last stored session is
+# treated as delisted on its last bar — without this, _alive would keep dead
+# tickers as entry candidates forever, evaluated on stale feature snapshots.
+FULL_MARKET_DELIST_GAP_DAYS = 21
 
-    Only tickers listed under `universe["instruments"]` are traded; this prevents
-    a reused SQLite DB from trading stale or out-of-config tickers.
+
+def load_instruments(conn, universe: dict, benchmark_ticker: str,
+                     *, mode: str = "config") -> tuple[list[Instrument], pd.Series]:
+    """Load tradable instruments + benchmark.
+
+    mode="config" (default): only tickers under `universe["instruments"]` are
+    traded. That hand-maintained list is inevitably survivorship-biased — it
+    names companies known and alive TODAY — so it is a demo subset, fine for
+    the paper loop's small book but not for honest backtest evidence.
+
+    mode="full_market": every ingested non-index instrument is tradable — the
+    anti-survivorship universe from the GPW archive backfill (dead companies
+    included, keyed ticker=isin). Archive-discovered rows carry no listing
+    metadata, so `delisted_on` is derived from the last observed bar when the
+    instrument stopped printing well before the market's last session (rule 3).
     """
+    if mode not in ("config", "full_market"):
+        raise ValueError(f"unknown universe mode: {mode!r}")
     bench_close = _load_close_series(conn, benchmark_ticker)
 
     allowed = {i["ticker"].lower() for i in universe.get("instruments", [])}
+    market_last = None
+    if mode == "full_market":
+        row = conn.execute(
+            "SELECT MAX(date) AS d FROM prices WHERE adjusted = 0").fetchone()
+        market_last = pd.to_datetime(row["d"]) if row and row["d"] else None
 
     instruments: list[Instrument] = []
     rows = conn.execute(
@@ -104,25 +127,91 @@ def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[
     for r in rows:
         if r["is_index"]:
             continue  # indices are not traded
-        if r["ticker"].lower() not in allowed:
+        if mode != "full_market" and r["ticker"].lower() not in allowed:
             continue  # not part of the configured universe
         df = compute.load_prices_asof(conn, r["id"], as_of="9999-12-31")
         if df.empty:
             continue
-        feats = compute.compute_features(df, benchmark_close=bench_for_features)
+        delisted_on = r["delisted_on"]
+        if (mode == "full_market" and delisted_on is None and market_last is not None
+                and df.index[-1]
+                < market_last - pd.Timedelta(days=FULL_MARKET_DELIST_GAP_DAYS)):
+            delisted_on = df.index[-1].date().isoformat()
+        actions = _load_actions_map(conn, r["id"])
+        feats = build_features(df, actions, bench_for_features)
         instruments.append(
             Instrument(
                 instrument_id=r["id"],
                 ticker=r["ticker"],
                 sector=r["sector"],
                 listed_from=r["listed_from"],
-                delisted_on=r["delisted_on"],
+                delisted_on=delisted_on,
                 prices=df,
                 features=feats,
-                actions=_load_actions_map(conn, r["id"]),
+                actions=actions,
             )
         )
     return instruments, bench_close
+
+
+def build_features(df: pd.DataFrame, actions: dict[str, list[dict]] | None,
+                   benchmark_close: pd.Series | None) -> pd.DataFrame:
+    """Feature panel for one instrument, corporate-action aware.
+
+    With actions present, features are computed on an in-memory back-adjusted
+    copy of the raw series, so momentum/SMA/ATR bridge split/dividend gaps
+    instead of reading them as market moves (a 1:10 split looked like a -90%
+    return for up to 252 sessions). Price-unit columns (close, sma50, sma200,
+    atr) are rescaled back to RAW units so sizing, stops and fills stay
+    consistent with the raw prices the engine executes at.
+
+    Point-in-time safe: a ratio feature's value at row T is invariant to
+    adjustment factors from ex-dates AFTER T — they scale every bar in the
+    lookback window uniformly and cancel — so each row equals what an
+    as-of-that-row adjustment would produce; no look-ahead. Recomputed from
+    the actions table on every load, so it can never go stale after an ingest
+    (unlike the materialized adjusted=1 rows, which remain for verification).
+    """
+    if not actions:
+        return compute.compute_features(df, benchmark_close=benchmark_close)
+    adj = _back_adjust_df(df, actions)
+    feats = compute.compute_features(adj, benchmark_close=benchmark_close)
+    scale = df["close"] / adj["close"]
+    for col in ("sma50", "sma200", "atr"):
+        feats[col] = feats[col] * scale
+    feats["close"] = df["close"]
+    return feats
+
+
+def _back_adjust_df(df: pd.DataFrame, actions: dict[str, list[dict]]) -> pd.DataFrame:
+    """Back-adjusted copy of a raw OHLC frame (last bar == raw series).
+
+    Same factor math as refdata.back_adjust — refdata.price_factor is the
+    single source: bars strictly before an ex-date are multiplied by that
+    action's price factor, cumulatively across actions. Volume is left
+    untouched (features never read it).
+    """
+    from app.ingestion import refdata  # local import: keeps engine import-light
+
+    adj = df.copy()
+    price_cols = ["open", "high", "low", "close"]
+    for ex_date in sorted(actions):
+        ex = pd.to_datetime(ex_date)
+        # last NON-NaN close strictly before the ex-date (NULL closes exist in
+        # the DB; a NaN here would zero every pre-ex bar via the dividend
+        # factor and wipe the whole pre-ex feature history)
+        prior_closes = df.loc[df.index < ex, "close"].dropna()
+        close_before = float(prior_closes.iloc[-1]) if len(prior_closes) else None
+        for action in actions[ex_date]:
+            factor = refdata.price_factor(
+                {"action_type": action["action_type"],
+                 "value_or_ratio": action["value_or_ratio"]},
+                close_before,
+            )
+            if factor != 1.0:
+                adj.loc[adj.index < ex, price_cols] = (
+                    adj.loc[adj.index < ex, price_cols] * factor)
+    return adj
 
 
 def _load_actions_map(conn, instrument_id: int) -> dict[str, list[dict]] | None:
@@ -221,6 +310,15 @@ def run_backtest(
         calendar = calendar[calendar >= start]
     if end is not None:
         calendar = calendar[calendar <= end]
+    # The strategy-vs-benchmark comparison (rule 5) is only meaningful where
+    # the benchmark actually existed: sessions before its first bar are
+    # dropped rather than back-filled with future values.
+    benchmark_clamp: str | None = None
+    if benchmark_close is not None and not benchmark_close.empty and len(calendar):
+        first_bench = benchmark_close.index[0]
+        if calendar[0] < first_bench:
+            calendar = calendar[calendar >= first_bench]
+            benchmark_clamp = first_bench.date().isoformat()
 
     cash = float(bt_cfg["initial_capital"])
     peak_equity = cash
@@ -260,6 +358,28 @@ def run_backtest(
                 continue
             for action in actions_in_window(inst, prev_day, day):
                 apply_action_to_order(order, action)
+
+        # --- 0b. write off positions held into a delisting ---------------------
+        # _mark_price already values a delisted position at zero; realize that
+        # loss in the trade ledger too, free the max_open_positions slot, and
+        # leave an auditable EXIT record (rule 8). Without this, a zombie
+        # position blocked the book forever while win_rate/profit_factor never
+        # saw the -100% — eight delistings-while-held would silently halt all
+        # new entries for the rest of a full-market run.
+        for tk, pos in list(positions.items()):
+            inst = inst_by_ticker[tk]
+            if _alive(inst, day):
+                continue
+            trade_pnls.append((0.0 - pos.entry_price) * pos.qty)
+            decisions_log.append({
+                "action": "EXIT", "ticker": tk, "instrument_id": inst.instrument_id,
+                "decision_date": day.date().isoformat(),
+                "fill_date": day.date().isoformat(),
+                "qty": pos.qty, "price": 0.0, "fee": 0.0, "slippage": 0.0,
+                "features": {"forced": "delisted_write_off"},
+                "cash_delta": 0.0,
+            })
+            del positions[tk]
 
         # --- 1. execute pending orders scheduled for today (next-bar fills) ---
         # Cash is mutated ATOMICALLY here (before mark-to-market), so the equity
@@ -390,7 +510,9 @@ def run_backtest(
         last_day = calendar[-1]
         for tk, pos in list(positions.items()):
             inst = inst_by_ticker[tk]
-            ref = _close_on(inst, last_day)
+            # a name suspended on the last session force-closes at its last
+            # known close (same mark the equity carried); delisted -> written off
+            ref = _mark_price(inst, last_day)
             if ref is None:
                 continue
             fill = fillmod.simulate_fill(
@@ -408,9 +530,9 @@ def run_backtest(
         if equity_records:
             d, _eq, _c, _ex = equity_records[-1]
             remaining_mv = sum(
-                _close_on(inst_by_ticker[t], last_day) * p.qty
+                _mark_price(inst_by_ticker[t], last_day) * p.qty
                 for t, p in positions.items()
-                if _close_on(inst_by_ticker[t], last_day) is not None
+                if _mark_price(inst_by_ticker[t], last_day) is not None
             )
             final_equity = cash + remaining_mv
             ratio = (remaining_mv / final_equity) if final_equity > 0 else 0.0
@@ -429,13 +551,16 @@ def run_backtest(
 
     m = metricsmod.compute_metrics(equity_series, trade_pnls, total_buy_notional)
     bm = metricsmod.compute_metrics(bench_curve, [], 0.0)
+    m_dict = m.as_dict()
+    if benchmark_clamp is not None:
+        m_dict["oos_start_clamped_to_benchmark"] = benchmark_clamp
 
     return BacktestResult(
         equity_curve=equity_series,
         benchmark_curve=bench_curve,
         trade_pnls=trade_pnls,
         total_buy_notional=total_buy_notional,
-        metrics=m.as_dict(),
+        metrics=m_dict,
         benchmark_metrics=bm.as_dict(),
         decisions=decisions_log,
         cash_curve=cash_series,
@@ -471,7 +596,7 @@ def build_day_state(
     holdings_value = 0.0
     for tk, pos in positions.items():
         inst = inst_by_ticker[tk]
-        close = _close_on(inst, day)
+        close = _mark_price(inst, day)
         if close is None:
             continue
         mv = close * pos.qty
@@ -515,6 +640,21 @@ def _close_on(inst: Instrument, day: pd.Timestamp):
         # the fill model (it would fill at NaN and poison cash/equity).
         return None if pd.isna(val) else float(val)
     return None
+
+
+def _mark_price(inst: Instrument, day: pd.Timestamp):
+    """Mark-to-market reference for a HELD position on `day`.
+
+    Today's close when the instrument printed a bar; otherwise the last known
+    close while it is still listed (a suspension is not a -100% market move —
+    zero-marking created phantom drawdowns that tripped the circuit breaker
+    and freed the exposure caps). Once delisted the position is worth zero
+    (implicit write-off): there is no market left to sell into.
+    """
+    close = _close_on(inst, day)
+    if close is None and _alive(inst, day):
+        close = _close_before(inst, day)
+    return close
 
 
 def _open_on(inst: Instrument, day: pd.Timestamp):
@@ -765,7 +905,19 @@ def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, dec
 def _benchmark_buy_and_hold(bench_close: pd.Series, index: pd.DatetimeIndex, capital: float) -> pd.Series:
     if bench_close is None or bench_close.empty:
         return pd.Series([capital] * len(index), index=index, dtype=float)
-    aligned = bench_close.reindex(index).ffill().bfill()
+    # As-of alignment (reindex with method="ffill" reads benchmark bars BEFORE
+    # the span's first session too, so a one-day benchmark gap on the first
+    # calendar session is filled from the past, never from the future). Plain
+    # back-filling would fabricate a flat zero-return benchmark segment out of
+    # FUTURE values, silently understating WIG20TR. run_backtest clamps the
+    # calendar to the benchmark's availability, so a leading NaN — possible
+    # only when the span truly precedes the first benchmark bar — is a caller
+    # bug.
+    aligned = bench_close.reindex(index, method="ffill")
+    if len(aligned) and pd.isna(aligned.iloc[0]):
+        raise ValueError(
+            "benchmark history starts after the requested span — clamp the "
+            "calendar to the benchmark's first bar (run_backtest does this)")
     if aligned.empty or aligned.iloc[0] == 0:
         return pd.Series([capital] * len(index), index=index, dtype=float)
     return capital * aligned / aligned.iloc[0]

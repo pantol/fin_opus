@@ -378,6 +378,25 @@ def _process_session(
             store.rebase_order(conn, order["_row_id"], qty=order["qty"],
                                stop_price=order.get("stop_price"))
 
+    # --- 0b. write off positions held into a delisting (engine parity) --------
+    # The engine realizes the -100% in the trade ledger and frees the book
+    # slot the moment _alive turns false; the paper book must do exactly the
+    # same or the two diverge on the first real delisting.
+    for tk, pos in list(positions.items()):
+        inst = inst_by_ticker[tk]
+        if engine._alive(inst, day):
+            continue
+        d = {"action": "EXIT", "ticker": tk, "instrument_id": inst.instrument_id,
+             "decision_date": day_iso, "fill_date": day_iso, "qty": pos.qty,
+             "price": 0.0, "fee": 0.0, "slippage": 0.0,
+             "features": {"forced": "delisted_write_off"}, "cash_delta": 0.0}
+        _persist_fill(conn, user_id, strategy_id, strategy_cfg, d)
+        store.close_position_row(conn, pos_rowids.pop(tk), exit_date=day_iso,
+                                 exit_price=0.0)
+        del positions[tk]
+        session.fills.append(d)
+        warnings.append(f"position {tk} written off: delisted (qty {pos.qty})")
+
     # --- 1. settle: fill yesterday's orders at TODAY's open -------------------
     decisions_session: list[dict] = []
     trade_pnls: list[float] = []

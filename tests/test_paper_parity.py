@@ -69,10 +69,13 @@ def _seed_market(conn):
                         volume=lambda i: 900.0 if i % 2 == 0 else 300.0)
     lowvol_id = _ingest(conn, "lowvol", lowvol, sector="banking",
                         listed_from="2018-01-01")
-    # Suspension: no bars for ~10 sessions mid-span while held; declines later.
+    # Suspension: no bars for ~10 sessions mid-span while held; then the name
+    # DELISTS while still held (bar ~350) — exercising the write-off path in
+    # both engines (position closed at 0, loss in the trade ledger).
     gappy = _two_phase(base=80, drift=0.0011, turn_at=380)
     gappy = gappy[:260] + gappy[270:]
-    _ingest(conn, "gappy", gappy, sector="mining", listed_from="2018-01-01")
+    _ingest(conn, "gappy", gappy, sector="mining", listed_from="2018-01-01",
+            delisted_on=gappy[350][0])
     # Volume shaped to force both engine requeue paths deterministically
     # (10% participation cap; 5.0 volume => 0 fillable shares):
     #   - thin during [200, 250): the first BUY attempts (signals start right
@@ -130,6 +133,8 @@ def _run_both(market):
     sells = [d for d in result.decisions if d["action"] == "EXIT"]
     partial_tickers = {d["ticker"] for d in sells if d["ticker"] == "lowvol"}
     assert partial_tickers, "fixture must exercise volume-capped sells"
+    assert any(d["price"] == 0.0 for d in sells), \
+        "fixture must exercise the delisting write-off"
 
     # Paper side: seed the watermark before the first session, replay everything.
     user_id = store.paper_user_id(bt_cfg["user_id"])

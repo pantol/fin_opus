@@ -315,8 +315,8 @@ def test_full_span_run_is_not_logged_as_a_trial(conn):
     assert conn.execute("SELECT COUNT(*) FROM strategy_trials").fetchone()[0] == 1
 
 
-def test_mc_marks_suspended_sessions_at_zero():
-    """No-bar sessions value positions at 0 — the engine's MTM convention."""
+def test_mc_marks_suspended_sessions_at_last_close_and_delisted_at_zero():
+    """Engine MTM convention: suspension = stale mark, delisting = write-off."""
     from tests.conftest import synthetic_series
 
     rows = synthetic_series(n=30, base=100, drift=0.0)
@@ -330,5 +330,18 @@ def test_mc_marks_suspended_sessions_at_zero():
                              listed_from=None, delisted_on=None, prices=df,
                              features=compute.compute_features(df))
     arrays = mc_benchmark._prepare([inst], idx_all, None)
-    assert arrays[0].close_mark[10] == 0.0 and arrays[0].close_mark[11] == 0.0
-    assert arrays[0].close_mark[9] > 0.0 and arrays[0].close_mark[12] > 0.0
+    # suspended sessions carry the last known close, not a phantom zero
+    assert arrays[0].close_mark[10] == arrays[0].close_mark[9] > 0.0
+    assert arrays[0].close_mark[11] == arrays[0].close_mark[9]
+    assert arrays[0].close_mark[12] > 0.0
+    # fills stay impossible on no-bar sessions regardless of the stale mark
+    assert not arrays[0].has_bar[10] and not arrays[0].has_bar[11]
+
+    # a DELISTED instrument is written off from its delisting date onward
+    delisted = engine.Instrument(
+        instrument_id=2, ticker="bbb", sector=None, listed_from=None,
+        delisted_on=idx_all[19].date().isoformat(), prices=df,
+        features=compute.compute_features(df))
+    arrays = mc_benchmark._prepare([delisted], idx_all, None)
+    assert arrays[0].close_mark[19] > 0.0
+    assert (arrays[0].close_mark[20:] == 0.0).all()

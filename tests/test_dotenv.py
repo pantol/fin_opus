@@ -68,6 +68,30 @@ def test_load_dotenv_missing_file_is_noop(tmp_path):
     assert dict(os.environ) == before
 
 
+def test_load_dotenv_invalid_utf8_is_noop_not_crash(tmp_path):
+    """A .env that is not valid UTF-8 (e.g. Polish text saved as CP1250) must
+    be skipped, not crash the entrypoint — under systemd Restart=always a
+    raising loader would crash-loop the collector."""
+    path = tmp_path / ".env"
+    path.write_bytes("GPW_TEST_DOTENV_CP1250=wartość\n".encode("cp1250"))
+    before = dict(os.environ)
+    cfg.load_dotenv(str(path))
+    assert dict(os.environ) == before
+
+
+def test_load_dotenv_utf8_bom_does_not_mangle_first_key(tmp_path):
+    """A UTF-8 BOM (Windows editors) must not turn the first key into
+    '\\ufeffKEY', which would silently drop it."""
+    path = tmp_path / ".env"
+    path.write_bytes(b"\xef\xbb\xbfGPW_TEST_DOTENV_BOM=first\n")
+    try:
+        cfg.load_dotenv(str(path))
+        assert os.environ["GPW_TEST_DOTENV_BOM"] == "first"
+        assert "﻿GPW_TEST_DOTENV_BOM" not in os.environ
+    finally:
+        os.environ.pop("GPW_TEST_DOTENV_BOM", None)
+
+
 def test_collector_main_loads_dotenv_before_running(tmp_path, monkeypatch):
     """`python -m app.ingestion.collect_news` from a directory with a .env must
     see HEALTHCHECK_URL_COLLECT by the time the cycle runs, or the dead-man's-

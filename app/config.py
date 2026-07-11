@@ -18,9 +18,10 @@ def load_dotenv(path: str = ".env") -> None:
 
     Zero-dependency by design: the project keeps its dependency surface small.
     Only sets keys NOT already present in the environment, so an explicit shell
-    export always overrides the file. Silently no-ops if `.env` is absent (it is
-    optional and .gitignored). Handles blank lines, `#` comments, an optional
-    `export ` prefix, and single/double-quoted values.
+    export always overrides the file. Silently no-ops if `.env` is absent or
+    not decodable as UTF-8 (it is optional and .gitignored; a broken file must
+    never take down an entrypoint). Handles blank lines, `#` comments, an
+    optional `export ` prefix, single/double-quoted values, and a UTF-8 BOM.
 
     Every long-running/cron entrypoint must call this (app.cli main,
     app.ingestion.collect_news main) so env-driven features like healthcheck
@@ -29,7 +30,7 @@ def load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path):
         return
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             for raw in fh:
                 line = raw.strip()
                 if not line or line.startswith("#"):
@@ -43,7 +44,7 @@ def load_dotenv(path: str = ".env") -> None:
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                     value = value[1:-1]
                 os.environ.setdefault(key, value)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return
 
 

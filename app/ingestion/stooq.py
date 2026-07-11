@@ -25,6 +25,8 @@ from typing import Iterable
 
 import requests
 
+from app.ingestion import provenance
+
 STOOQ_URLS = (
     "https://stooq.pl/q/d/l/?s={ticker}&i=d",
     "https://stooq.com/q/d/l/?s={ticker}&i=d",
@@ -174,17 +176,25 @@ def upsert_instrument(conn, inst: dict, is_index: bool = False) -> int:
     return int(row[0])
 
 
-def store_bars(conn, instrument_id: int, bars: Iterable[Bar], adjusted: bool = False) -> int:
-    """Insert bars for an instrument. Idempotent on (instrument_id, date, adjusted)."""
+def store_bars(conn, instrument_id: int, bars: Iterable[Bar], adjusted: bool = False,
+               source: str = "stooq") -> int:
+    """Insert bars for an instrument. Idempotent on (instrument_id, date, adjusted).
+
+    `source` records provenance ('gpw' | 'stooq' | 'demo'); a re-ingest of an
+    existing bar updates it to the latest writer. This is the write layer only —
+    demo/real separation is enforced by the callers via
+    provenance.assert_no_mixing BEFORE any bar is written.
+    """
     n = 0
     for b in bars:
         conn.execute(
             """
-            INSERT INTO prices (instrument_id, date, as_of_date, open, high, low, close, volume, adjusted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO prices (instrument_id, date, as_of_date, open, high, low, close, volume, adjusted, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(instrument_id, date, adjusted) DO UPDATE SET
                 as_of_date=excluded.as_of_date, open=excluded.open, high=excluded.high,
-                low=excluded.low, close=excluded.close, volume=excluded.volume
+                low=excluded.low, close=excluded.close, volume=excluded.volume,
+                source=excluded.source
             """,
             (
                 instrument_id,
@@ -196,6 +206,7 @@ def store_bars(conn, instrument_id: int, bars: Iterable[Bar], adjusted: bool = F
                 b.close,
                 b.volume,
                 1 if adjusted else 0,
+                source,
             ),
         )
         n += 1
@@ -214,7 +225,7 @@ class IngestReport:
 
 
 def ingest_universe(conn, universe: dict, fetcher=fetch_csv,
-                    delay_seconds: float = 0.0) -> IngestReport:
+                    delay_seconds: float = 0.0, source: str = "stooq") -> IngestReport:
     """Ingest indices + instruments described by the universe config.
 
     `fetcher` is injectable so tests can supply cached CSV without network.
@@ -222,8 +233,11 @@ def ingest_universe(conn, universe: dict, fetcher=fetch_csv,
     does not abort the rest: successes are committed per ticker (upserts are
     idempotent, so partial ingests are safe to re-run) and failures are
     collected in the report. `delay_seconds` sleeps between fetches to stay
-    polite to the live endpoint.
+    polite to the live endpoint. `source` tags row provenance (the demo
+    generator routes through here with source='demo'); mixing demo and real
+    rows in one database raises DataMixingError before anything is written.
     """
+    provenance.assert_no_mixing(conn, source)
     report = IngestReport()
 
     index_entries = list(universe.get("indices", []))
@@ -247,7 +261,8 @@ def ingest_universe(conn, universe: dict, fetcher=fetch_csv,
         if not bars:
             report.failures[ticker] = "no rows parsed (empty history?)"
             continue
-        report.counts[ticker] = store_bars(conn, inst_id, bars, adjusted=False)
+        report.counts[ticker] = store_bars(conn, inst_id, bars, adjusted=False,
+                                           source=source)
         conn.commit()
 
     conn.commit()

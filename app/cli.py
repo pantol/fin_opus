@@ -21,7 +21,7 @@ import yaml
 from app import config as cfg
 from app.backtest import ab_harness, engine
 from app.db import connect, init_db
-from app.ingestion import demo, stooq
+from app.ingestion import demo, provenance, stooq
 from app.logging import decisions as declog
 from app.paper import loop as paper_loop
 from app.paper.store import PAPER_PREFIX
@@ -64,35 +64,40 @@ def cmd_ingest(args) -> int:
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
-    if args.offline:
-        print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
-        report = demo.ingest_offline(conn, universe)
-    elif args.source == "stooq":
-        print("Ingesting from Stooq (this hits the network)...")
-        report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
-    else:  # gpw (default): official session archive + GPW Benchmark indices
-        from app.ingestion import gpw_archive
+    try:
+        if args.offline:
+            print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
+            report = demo.ingest_offline(conn, universe)
+        elif args.source == "stooq":
+            print("Ingesting from Stooq (this hits the network)...")
+            report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
+        else:  # gpw (default): official session archive + GPW Benchmark indices
+            from app.ingestion import gpw_archive
 
-        end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
-            datetime.now(ZoneInfo("Europe/Warsaw")))
-        if args.start:
-            start = date.fromisoformat(args.start)
-        else:
-            # Incremental: resume after the last stored bar; fresh DB -> 90 days.
-            row = conn.execute(
-                "SELECT MAX(date) FROM prices WHERE adjusted = 0").fetchone()
-            start = (date.fromisoformat(row[0]) + timedelta(days=1)
-                     if row and row[0] else end - timedelta(days=90))
-        if start > end:
-            print(f"Already up to date (last bar {start - timedelta(days=1)}).")
-            conn.close()
-            return 0
-        n_days = (end - start).days + 1
-        print(f"Ingesting from GPW archive: {start} .. {end} "
-              f"({n_days} calendar days, ~1 request/session day"
-              f"{', FULL market' if args.full else ', universe only'})...")
-        report = gpw_archive.ingest_range(conn, universe, start, end,
-                                          full_market=args.full)
+            end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
+                datetime.now(ZoneInfo("Europe/Warsaw")))
+            if args.start:
+                start = date.fromisoformat(args.start)
+            else:
+                # Incremental: resume after the last stored REAL bar (demo rows
+                # never anchor a live backfill); fresh DB -> 90 days.
+                last = provenance.last_real_bar_date(conn)
+                start = (date.fromisoformat(last) + timedelta(days=1)
+                         if last else end - timedelta(days=90))
+            if start > end:
+                print(f"Already up to date (last bar {start - timedelta(days=1)}).")
+                conn.close()
+                return 0
+            n_days = (end - start).days + 1
+            print(f"Ingesting from GPW archive: {start} .. {end} "
+                  f"({n_days} calendar days, ~1 request/session day"
+                  f"{', FULL market' if args.full else ', universe only'})...")
+            report = gpw_archive.ingest_range(conn, universe, start, end,
+                                              full_market=args.full)
+    except provenance.DataMixingError as exc:
+        print(f"ERROR: {exc}")
+        conn.close()
+        return 2
     total = sum(report.counts.values())
     print(f"Ingested {total} bars across {len(report.counts)} tickers.")
     for tk, n in sorted(report.counts.items()):
@@ -124,6 +129,31 @@ def _default_ingest_end(now_warsaw):
     from datetime import timedelta
     today = now_warsaw.date()
     return today if now_warsaw.hour >= 18 else today - timedelta(days=1)
+
+
+def cmd_purge_demo(args) -> int:
+    """Delete all demo price rows so real ingestion can proceed.
+
+    Demo rows are synthetic and carry no information, so deleting them is
+    always safe. Anything DERIVED from them while they were present (features
+    previews, backtest metrics, paper state) described fake prices — discard
+    those results; with `--db` pointing at a demo-only sandbox, deleting the
+    whole database file is the cleaner reset.
+    """
+    conn = connect(args.db)
+    init_db(conn)
+    n = conn.execute("SELECT COUNT(*) FROM prices WHERE source = ?",
+                     (provenance.DEMO_SOURCE,)).fetchone()[0]
+    if not n:
+        print("No demo price rows found; nothing to purge.")
+        conn.close()
+        return 0
+    conn.execute("DELETE FROM prices WHERE source = ?", (provenance.DEMO_SOURCE,))
+    conn.commit()
+    print(f"Purged {n} demo price rows. Results computed while demo data was "
+          "present (backtests, paper state) described fake prices — discard them.")
+    conn.close()
+    return 0
 
 
 def cmd_features(args) -> int:
@@ -725,6 +755,8 @@ def main(argv=None) -> int:
     ing.add_argument("--full", action="store_true",
                      help="GPW source: store EVERY PLN instrument found (anti-survivorship "
                           "backfill), not just the configured universe")
+    sub.add_parser("purge-demo",
+                   help="Delete demo (synthetic) price rows so real ingestion can proceed")
     sub.add_parser("features", help="Compute and preview features")
     bt = sub.add_parser("backtest", help="Run walk-forward backtest vs WIG20TR")
     bt.add_argument("--strategy", default="trend_momentum")
@@ -778,6 +810,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "ingest":
         return cmd_ingest(args)
+    if args.command == "purge-demo":
+        return cmd_purge_demo(args)
     if args.command == "features":
         return cmd_features(args)
     if args.command == "backtest":

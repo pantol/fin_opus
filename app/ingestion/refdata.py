@@ -10,6 +10,7 @@ All of this is deterministic code. No LLM anywhere near it.
 """
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 from app.ingestion.stooq import Bar, store_bars
@@ -212,7 +213,7 @@ def derive_adjusted_series(conn, instrument_id: int) -> int:
     if not actions:
         return 0
     rows = conn.execute(
-        "SELECT date, as_of_date, open, high, low, close, volume FROM prices"
+        "SELECT date, as_of_date, open, high, low, close, volume, source FROM prices"
         " WHERE instrument_id = ? AND adjusted = 0 ORDER BY date",
         (instrument_id,),
     ).fetchall()
@@ -223,7 +224,14 @@ def derive_adjusted_series(conn, instrument_id: int) -> int:
     ]
     if not bars:
         return 0
-    n = store_bars(conn, instrument_id, back_adjust(bars, actions), adjusted=True)
+    # Each adjusted row inherits the provenance of the raw row it derives from
+    # (a real series may legitimately mix 'gpw' and 'stooq' segments).
+    adjusted = back_adjust(bars, actions)
+    n = 0
+    for source, group in itertools.groupby(
+            zip(adjusted, (r["source"] for r in rows)), key=lambda pair: pair[1]):
+        n += store_bars(conn, instrument_id, [bar for bar, _ in group],
+                        adjusted=True, source=source)
     conn.commit()
     return n
 

@@ -59,6 +59,17 @@ python -m app.cli ingest --source stooq                        # legacy path (lo
 make ingest-offline                                            # deterministic DEMO data (NOT real prices)
 ```
 
+**Demo and real data never share a database.** Every price row carries a
+`source` (`gpw` / `stooq` / `demo`). `make ingest-offline` writes synthetic
+bars for the *real* universe tickers, so mixing them with market data would
+let the incremental ingest silently extend fake history — both directions are
+therefore refused before anything is written: `ingest --offline` errors on a
+database with real rows, and live ingest errors on a database with demo rows.
+Keep demo runs in a sandbox (`python -m app.cli --db data/demo.db ingest
+--offline`), or clear demo rows out of a real database with
+`python -m app.cli purge-demo`. The incremental resume of `make ingest` also
+ignores demo rows, so synthetic history can never anchor a live backfill.
+
 ### 2b. Reference data + data quality
 
 ```bash
@@ -243,6 +254,7 @@ app/
     gpw_archive.py      # PRIMARY: GPW official session archive + GPW Benchmark indices
     stooq.py            # legacy Stooq CSV path (login-gated by Stooq as of 2026)
     demo.py             # deterministic offline demo data (NOT real prices)
+    provenance.py       # source tagging + demo/real mixing guard
     refdata.py          # index membership + corporate actions + adjusted-series deriver
     quality.py          # data-quality monitor (make check-data)
     news_collector.py   # ESPI/EBI + news RSS collector (point-in-time, ZERO LLM)

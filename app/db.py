@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS instruments (
 
 -- as_of_date = the date the row became publicly available (NOT the period it describes).
 -- raw vs adjusted prices are stored separately and flagged via `adjusted`.
+-- `source` is row provenance: demo rows are synthetic fakes and must never
+-- share a database with real ('gpw'/'stooq') rows — see app.ingestion.provenance.
 CREATE TABLE IF NOT EXISTS prices (
     instrument_id INTEGER NOT NULL REFERENCES instruments(id),
     date          TEXT NOT NULL,    -- bar date (ISO)
@@ -36,6 +38,8 @@ CREATE TABLE IF NOT EXISTS prices (
     close         REAL,
     volume        REAL,
     adjusted      INTEGER NOT NULL DEFAULT 0,   -- boolean (0/1)
+    source        TEXT NOT NULL DEFAULT 'gpw'
+                  CHECK (source IN ('gpw', 'stooq', 'demo')),
     PRIMARY KEY (instrument_id, date, adjusted)
 );
 CREATE INDEX IF NOT EXISTS idx_prices_asof ON prices(instrument_id, as_of_date, adjusted);
@@ -344,6 +348,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     if not column_exists(conn, "instruments", "isin"):
         conn.execute("ALTER TABLE instruments ADD COLUMN isin TEXT")
+    if not column_exists(conn, "prices", "source"):
+        # Pre-existing rows are assumed REAL and labelled 'gpw' (mislabelling
+        # stooq as gpw is harmless — both are real; the guard only separates
+        # demo from real). Caveat: a pre-migration database that already holds
+        # demo bars (`make ingest-offline`) cannot be told apart and should be
+        # deleted and re-ingested.
+        conn.execute(
+            "ALTER TABLE prices ADD COLUMN source TEXT NOT NULL DEFAULT 'gpw' "
+            "CHECK (source IN ('gpw', 'stooq', 'demo'))"
+        )
     if column_exists(conn, "llm_features", "llm_score") and not column_exists(
             conn, "llm_features", "relevance"):
         conn.execute("ALTER TABLE llm_features ADD COLUMN relevance TEXT")

@@ -98,28 +98,50 @@ def test_store_bars_is_idempotent(conn):
     assert n == 1
 
 
-def test_cmd_ingest_zero_bar_hint_is_source_aware(tmp_path, capsys, monkeypatch):
-    """All-failed ingest prints a hint naming the source that actually failed."""
+def test_cmd_ingest_zero_bar_hint_matches_failure_cause(tmp_path, capsys, monkeypatch):
+    """All-failed ingest diagnoses the actual cause (network / calendar /
+    config / source), never a blanket network accusation."""
     import app.cli as cli
     from app import config as cfg
     from app.ingestion import gpw_archive
 
-    monkeypatch.setattr(cfg, "load_universe", lambda: {
-        "benchmark": {"ticker": "wig20tr", "name": "WIG20TR", "is_index": True},
-        "instruments": [{"ticker": "pko", "name": "PKO"}],
-    })
-    failed = stooq.IngestReport(failures={"pko": "connection reset"})
+    from tests.test_cli_llm import _universe
 
-    monkeypatch.setattr(gpw_archive, "ingest_range", lambda *a, **k: failed)
-    rc = cli.main(["--db", str(tmp_path / "gpw.db"), "ingest"])
-    out = capsys.readouterr().out
-    assert rc == 2
+    monkeypatch.setattr(cfg, "load_universe", _universe)
+    db = str(tmp_path / "x.db")
+
+    def run(argv, report):
+        monkeypatch.setattr(gpw_archive, "ingest_range", lambda *a, **k: report)
+        monkeypatch.setattr(stooq, "ingest_universe", lambda *a, **k: report)
+        rc = cli.main(argv)
+        assert rc == 2
+        return capsys.readouterr().out
+
+    # gpw: session-file fetches failed -> network/WAF hint + retry advice.
+    out = run(["--db", db, "ingest"],
+              stooq.IngestReport(failures={"session:2026-07-06": "HTTP 403"},
+                                 sessions=0))
     assert "GPW archive requests are failing" in out
     assert "Stooq is refusing" not in out
 
-    monkeypatch.setattr(stooq, "ingest_universe", lambda *a, **k: failed)
-    rc = cli.main(["--db", str(tmp_path / "stooq.db"), "ingest", "--source", "stooq"])
-    out = capsys.readouterr().out
-    assert rc == 2
+    # gpw: window had no trading days at all -> calendar, not network.
+    out = run(["--db", db, "ingest"],
+              stooq.IngestReport(
+                  failures={"pko": "ISIN PLPKO0000016 not found in any "
+                                   "session file 2026-07-04..2026-07-05 "
+                                   "(0 sessions)"},
+                  sessions=0))
+    assert "No trading sessions in the requested window" in out
+    assert "Retry later" not in out
+
+    # gpw: session files came down fine, nothing matched -> config hint.
+    out = run(["--db", db, "ingest"],
+              stooq.IngestReport(failures={"pko": "no ISIN in universe config"},
+                                 sessions=3))
+    assert "no bars matched the configured universe" in out
+
+    # stooq keeps its own bot-check message.
+    out = run(["--db", db, "ingest", "--source", "stooq"],
+              stooq.IngestReport(failures={"pko": "Access denied"}))
     assert "Stooq is refusing automated CSV access" in out
     assert "GPW archive requests are failing" not in out

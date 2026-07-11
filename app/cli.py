@@ -101,15 +101,26 @@ def cmd_ingest(args) -> int:
         print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
         for tk, reason in sorted(report.failures.items()):
             print(f"  {tk:10s} {reason}")
+        # Demo data cannot fail today; the guard keeps any future demo
+        # failure mode from being blamed on the network.
         if not report.counts and not args.offline:
+            retry = ("Retry later from a normal connection, or use: "
+                     "python -m app.cli ingest --offline  (demo data only).")
             if args.source == "stooq":
                 print("\nStooq is refusing automated CSV access from this "
                       "network (bot-check / 'Access denied' / daily limit).")
-            else:  # gpw archive
+                print(retry)
+            elif any(k.startswith("session:") for k in report.failures):
                 print("\nGPW archive requests are failing (gpw.pl WAF/"
                       "bot-check, network outage, or the site is down).")
-            print("Retry later from a normal connection, or use: "
-                  "python -m app.cli ingest --offline  (demo data only).")
+                print(retry)
+            elif report.sessions == 0:
+                print("\nNo trading sessions in the requested window "
+                      "(weekend/holiday) — nothing to ingest yet.")
+            else:
+                print("\nSession files downloaded, but no bars matched the "
+                      "configured universe (check `isin` fields in "
+                      "config/universe.yaml).")
         conn.close()
         return 2
     conn.close()

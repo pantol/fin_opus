@@ -313,4 +313,5 @@ def ingest_range(
         report.failures[entry["ticker"]] = (
             f"ISIN {isin} not found in any session file "
             f"{start.isoformat()}..{end.isoformat()} ({sessions} sessions)")
+    report.sessions = sessions
     return report

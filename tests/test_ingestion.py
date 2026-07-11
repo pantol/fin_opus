@@ -96,3 +96,30 @@ def test_store_bars_is_idempotent(conn):
     stooq.store_bars(conn, inst_id, bars)  # again
     n = conn.execute("SELECT COUNT(*) FROM prices WHERE instrument_id=?", (inst_id,)).fetchone()[0]
     assert n == 1
+
+
+def test_cmd_ingest_zero_bar_hint_is_source_aware(tmp_path, capsys, monkeypatch):
+    """All-failed ingest prints a hint naming the source that actually failed."""
+    import app.cli as cli
+    from app import config as cfg
+    from app.ingestion import gpw_archive
+
+    monkeypatch.setattr(cfg, "load_universe", lambda: {
+        "benchmark": {"ticker": "wig20tr", "name": "WIG20TR", "is_index": True},
+        "instruments": [{"ticker": "pko", "name": "PKO"}],
+    })
+    failed = stooq.IngestReport(failures={"pko": "connection reset"})
+
+    monkeypatch.setattr(gpw_archive, "ingest_range", lambda *a, **k: failed)
+    rc = cli.main(["--db", str(tmp_path / "gpw.db"), "ingest"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "GPW archive requests are failing" in out
+    assert "Stooq is refusing" not in out
+
+    monkeypatch.setattr(stooq, "ingest_universe", lambda *a, **k: failed)
+    rc = cli.main(["--db", str(tmp_path / "stooq.db"), "ingest", "--source", "stooq"])
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "Stooq is refusing automated CSV access" in out
+    assert "GPW archive requests are failing" not in out

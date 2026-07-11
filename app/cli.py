@@ -101,9 +101,13 @@ def cmd_ingest(args) -> int:
         print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
         for tk, reason in sorted(report.failures.items()):
             print(f"  {tk:10s} {reason}")
-        if not report.counts:
-            print("\nStooq is refusing automated CSV access from this network "
-                  "(bot-check / 'Access denied' / daily limit).")
+        if not report.counts and not args.offline:
+            if args.source == "stooq":
+                print("\nStooq is refusing automated CSV access from this "
+                      "network (bot-check / 'Access denied' / daily limit).")
+            else:  # gpw archive
+                print("\nGPW archive requests are failing (gpw.pl WAF/"
+                      "bot-check, network outage, or the site is down).")
             print("Retry later from a normal connection, or use: "
                   "python -m app.cli ingest --offline  (demo data only).")
         conn.close()

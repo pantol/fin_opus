@@ -27,36 +27,6 @@ from app.paper import loop as paper_loop
 from app.paper.store import PAPER_PREFIX
 
 
-def _load_dotenv(path: str = ".env") -> None:
-    """Load KEY=VALUE pairs from a local `.env` into os.environ (shell env wins).
-
-    Zero-dependency by design: the project keeps its dependency surface small.
-    Only sets keys NOT already present in the environment, so an explicit shell
-    export always overrides the file. Silently no-ops if `.env` is absent (it is
-    optional and .gitignored). Handles blank lines, `#` comments, an optional
-    `export ` prefix, and single/double-quoted values.
-    """
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export "):]
-                key, sep, value = line.partition("=")
-                if not sep:
-                    continue
-                key, value = key.strip(), value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                os.environ.setdefault(key, value)
-    except OSError:
-        return
-
-
 def cmd_ingest(args) -> int:
     from datetime import date, datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -708,7 +678,7 @@ def _print_metrics_table(result, benchmark_name: str) -> None:
 
 
 def main(argv=None) -> int:
-    _load_dotenv()  # consume a local .env (shell exports still take precedence)
+    cfg.load_dotenv()  # consume a local .env (shell exports still take precedence)
     parser = argparse.ArgumentParser(prog="app.cli", description="GPW deterministic core")
     parser.add_argument("--db", default=None, help="SQLite path (default: data/gpw.db)")
     sub = parser.add_subparsers(dest="command", required=True)

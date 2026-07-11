@@ -1,6 +1,7 @@
-"""Configuration loading helpers (YAML + paths)."""
+"""Configuration loading helpers (YAML + paths + .env)."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,40 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
 DEFAULT_DB_PATH = DATA_DIR / "gpw.db"
+
+
+def load_dotenv(path: str = ".env") -> None:
+    """Load KEY=VALUE pairs from a local `.env` into os.environ (shell env wins).
+
+    Zero-dependency by design: the project keeps its dependency surface small.
+    Only sets keys NOT already present in the environment, so an explicit shell
+    export always overrides the file. Silently no-ops if `.env` is absent (it is
+    optional and .gitignored). Handles blank lines, `#` comments, an optional
+    `export ` prefix, and single/double-quoted values.
+
+    Every long-running/cron entrypoint must call this (app.cli main,
+    app.ingestion.collect_news main) so env-driven features like healthcheck
+    pings work identically under `make`, cron, and systemd.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                key, sep, value = line.partition("=")
+                if not sep:
+                    continue
+                key, value = key.strip(), value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
+    except OSError:
+        return
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:

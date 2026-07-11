@@ -411,6 +411,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/opt/fin_opus
+EnvironmentFile=/opt/fin_opus/.env
 ExecStart=/opt/fin_opus/.venv/bin/python -m app.ingestion.collect_news --loop
 Restart=always
 RestartSec=30

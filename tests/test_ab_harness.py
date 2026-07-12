@@ -25,7 +25,7 @@ def _build_db(path=":memory:"):
     def ing(t, rows, **kw):
         iid = stooq.upsert_instrument(conn, {"ticker": t, "name": t, **kw},
                                       is_index=kw.get("is_index", False))
-        stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)))
+        stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)), source="stooq")
         return iid
 
     ing("wig20tr", synthetic_series(n=900, base=2000, drift=0.0005), is_index=True)

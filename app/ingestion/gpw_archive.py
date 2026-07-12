@@ -225,7 +225,7 @@ def ingest_range(
     abort the rest; successes commit per session; re-runs are idempotent.
     Refuses (before any write or network call) a database holding demo rows.
     """
-    provenance.assert_no_mixing(conn, "gpw")
+    provenance.assert_no_mixing(conn, provenance.GPW_SOURCE)
     report = IngestReport()
 
     # -- indices / benchmark (one request each, full range) --
@@ -253,7 +253,7 @@ def ingest_range(
             continue
         inst_id = upsert_instrument(conn, entry, is_index=True)
         report.counts[ticker] = store_bars(conn, inst_id, bars, adjusted=False,
-                                           source="gpw")
+                                           source=provenance.GPW_SOURCE)
         conn.commit()
 
     # -- equities: one session file per trading day --
@@ -295,7 +295,7 @@ def ingest_range(
                     tk = tickers[row.isin]
                     report.counts[tk] = report.counts.get(tk, 0) + store_bars(
                         conn, inst_ids[row.isin], [bar], adjusted=False,
-                        source="gpw")
+                        source=provenance.GPW_SOURCE)
                 conn.commit()
             if delay_seconds > 0:
                 time.sleep(delay_seconds)

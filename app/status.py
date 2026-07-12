@@ -62,7 +62,12 @@ def run_status(conn, backup_cfg: dict, *, now: datetime | None = None) -> Status
     if row and row["d"]:
         line = f"prices: {row['n']} bars, last session {row['d']}"
         if row["demo_n"]:
+            # Demo bars in the MONITORED database are always anomalous (demo
+            # runs live in data/demo.db) — page the operator, don't just log.
             line += f" [WARNING: {row['demo_n']} DEMO bars — synthetic, NOT real prices]"
+            report.stale.append(
+                f"baza zawiera {row['demo_n']} syntetycznych barow DEMO "
+                "(to nie sa prawdziwe ceny) — uruchom purge-demo")
         report.lines.append(line)
     else:
         report.lines.append("prices: EMPTY — run `make ingest`")

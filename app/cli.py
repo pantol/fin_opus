@@ -65,6 +65,11 @@ def cmd_ingest(args) -> int:
     init_db(conn)
     universe = cfg.load_universe()
     try:
+        # Guard FIRST — before the incremental early-return below, so a mixed
+        # database is refused (exit 2) even on a day with nothing to ingest.
+        # Also takes the write lock, closing the concurrent-ingest race.
+        provenance.assert_no_mixing(
+            conn, provenance.DEMO_SOURCE if args.offline else args.source)
         if args.offline:
             print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
             report = demo.ingest_offline(conn, universe)
@@ -110,7 +115,8 @@ def cmd_ingest(args) -> int:
             print("\nStooq is refusing automated CSV access from this network "
                   "(bot-check / 'Access denied' / daily limit).")
             print("Retry later from a normal connection, or use: "
-                  "python -m app.cli ingest --offline  (demo data only).")
+                  "make ingest-offline  (deterministic demo data in its own "
+                  "database, data/demo.db).")
         conn.close()
         return 2
     conn.close()
@@ -131,27 +137,48 @@ def _default_ingest_end(now_warsaw):
     return today if now_warsaw.hour >= 18 else today - timedelta(days=1)
 
 
+# Everything derived from prices, in FK-safe deletion order (referencing
+# tables before decisions). Wiped by purge-demo when the database never held
+# real prices: every one of these rows then described synthetic data.
+_DERIVED_TABLES = ("paper_orders", "overrides", "trades", "decisions",
+                   "positions", "equity_curve", "paper_state", "strategy_trials")
+
+
 def cmd_purge_demo(args) -> int:
-    """Delete all demo price rows so real ingestion can proceed.
+    """Delete demo price rows AND, on a demo-only DB, everything derived.
 
     Demo rows are synthetic and carry no information, so deleting them is
-    always safe. Anything DERIVED from them while they were present (features
-    previews, backtest metrics, paper state) described fake prices — discard
-    those results; with `--db` pointing at a demo-only sandbox, deleting the
-    whole database file is the cleaner reset.
+    always safe. If the database never held real prices, every derived row
+    (decisions, trades, equity, trials, paper state) described fake data too
+    and is wiped with them — otherwise demo trials would keep polluting the
+    Deflated Sharpe of future REAL backtests and a demo-anchored paper state
+    would wedge the loop. If real rows DO remain (a pre-guard mixed database),
+    derived rows cannot be attributed and are left with a warning.
     """
     conn = connect(args.db)
     init_db(conn)
-    n = conn.execute("SELECT COUNT(*) FROM prices WHERE source = ?",
-                     (provenance.DEMO_SOURCE,)).fetchone()[0]
+    n = conn.execute("DELETE FROM prices WHERE source = ?",
+                     (provenance.DEMO_SOURCE,)).rowcount
     if not n:
+        conn.commit()
         print("No demo price rows found; nothing to purge.")
         conn.close()
         return 0
-    conn.execute("DELETE FROM prices WHERE source = ?", (provenance.DEMO_SOURCE,))
+    wiped: dict[str, int] = {}
+    if not provenance.real_rows_present(conn):
+        for table in _DERIVED_TABLES:
+            count = conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608 - fixed table list
+            if count:
+                wiped[table] = count
     conn.commit()
-    print(f"Purged {n} demo price rows. Results computed while demo data was "
-          "present (backtests, paper state) described fake prices — discard them.")
+    print(f"Purged {n} demo price rows.")
+    if wiped:
+        print("Also cleared demo-derived state: "
+              + ", ".join(f"{t} ({c})" for t, c in wiped.items()) + ".")
+    elif provenance.real_rows_present(conn):
+        print("Real price rows remain, so derived results were kept — but any "
+              "decisions/trades/equity/trials/paper state created while demo "
+              "data was present described fake prices; review them manually.")
     conn.close()
     return 0
 
@@ -746,11 +773,13 @@ def main(argv=None) -> int:
     ing = sub.add_parser("ingest", help="Fetch EOD data into SQLite (GPW archive by default)")
     ing.add_argument("--offline", action="store_true",
                      help="Use deterministic DEMO data instead of a live source (NOT real prices)")
-    ing.add_argument("--source", choices=["gpw", "stooq"], default="gpw",
+    ing.add_argument("--source", choices=list(provenance.REAL_SOURCES),
+                     default=provenance.GPW_SOURCE,
                      help="Live source: GPW official archive (default) or Stooq CSV "
                           "(login-gated as of 2026)")
     ing.add_argument("--start", default=None,
-                     help="Backfill start date (ISO). Default: resume after the last stored bar")
+                     help="Backfill start date (ISO). Default: resume after the "
+                          "last stored real (non-demo) bar")
     ing.add_argument("--end", default=None, help="End date (ISO). Default: today (Warsaw)")
     ing.add_argument("--full", action="store_true",
                      help="GPW source: store EVERY PLN instrument found (anti-survivorship "

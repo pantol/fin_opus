@@ -56,19 +56,26 @@ Useful variants:
 ```bash
 python -m app.cli ingest --start 2020-01-01 --end 2020-12-31   # explicit range
 python -m app.cli ingest --source stooq                        # legacy path (login-gated by Stooq)
-make ingest-offline                                            # deterministic DEMO data (NOT real prices)
+make ingest-offline                                            # deterministic DEMO data -> data/demo.db (NOT real prices)
 ```
 
 **Demo and real data never share a database.** Every price row carries a
-`source` (`gpw` / `stooq` / `demo`). `make ingest-offline` writes synthetic
-bars for the *real* universe tickers, so mixing them with market data would
-let the incremental ingest silently extend fake history — both directions are
-therefore refused before anything is written: `ingest --offline` errors on a
-database with real rows, and live ingest errors on a database with demo rows.
-Keep demo runs in a sandbox (`python -m app.cli --db data/demo.db ingest
---offline`), or clear demo rows out of a real database with
-`python -m app.cli purge-demo`. The incremental resume of `make ingest` also
-ignores demo rows, so synthetic history can never anchor a live backfill.
+`source` (`gpw` / `stooq` / `demo`). Demo bars are synthetic fakes for the
+*real* universe tickers, so mixing them with market data would let the
+incremental ingest silently extend fake history — both directions are
+therefore refused before anything is written (and the guard takes the write
+lock first, so two concurrent ingests cannot slip past each other). The
+offline targets (`make ingest-offline`, `backtest-offline`, `ab-offline`)
+run against their own `data/demo.db` (override with `DEMO_DB=...`), the
+daily paper loop refuses to run on demo bars, and `make status` pages when
+demo rows appear in the monitored database. To clear demo rows out of a
+database, `python -m app.cli purge-demo` — on a demo-only database it also
+wipes everything derived from them (decisions, trades, equity, strategy
+trials, paper state), since those rows described fake prices. The incremental
+resume of `make ingest` ignores demo rows, and the schema migration detects
+pre-existing demo bars (only the demo generator produces a 2015-01-01 bar —
+GPW was closed that day) so synthetic history can never anchor a live
+backfill, even on a database created before this guard existed.
 
 ### 2b. Reference data + data quality
 

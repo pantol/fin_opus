@@ -14,7 +14,7 @@ def _build_live_db(path, n=30):
     conn = connect(str(path))
     init_db(conn)
     iid = stooq.upsert_instrument(conn, {"ticker": "aaa", "name": "aaa", "sector": "x"})
-    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(synthetic_series(n=n))))
+    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(synthetic_series(n=n))), source="stooq")
     conn.commit()
     conn.close()
     return path

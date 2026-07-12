@@ -177,14 +177,19 @@ def upsert_instrument(conn, inst: dict, is_index: bool = False) -> int:
 
 
 def store_bars(conn, instrument_id: int, bars: Iterable[Bar], adjusted: bool = False,
-               source: str = "stooq") -> int:
+               *, source: str) -> int:
     """Insert bars for an instrument. Idempotent on (instrument_id, date, adjusted).
 
-    `source` records provenance ('gpw' | 'stooq' | 'demo'); a re-ingest of an
-    existing bar updates it to the latest writer. This is the write layer only —
-    demo/real separation is enforced by the callers via
-    provenance.assert_no_mixing BEFORE any bar is written.
+    `source` records provenance ('gpw' | 'stooq' | 'demo') and is REQUIRED:
+    a forgotten default would silently mint fake provenance, so omission is a
+    TypeError and an unknown value a ValueError. A re-ingest of an existing bar
+    updates it to the latest writer. This is the write layer only — demo/real
+    separation is enforced by the callers via provenance.assert_no_mixing
+    BEFORE any bar is written.
     """
+    if source not in provenance.VALID_SOURCES:
+        raise ValueError(
+            f"Unknown price source {source!r}; expected one of {provenance.VALID_SOURCES}")
     n = 0
     for b in bars:
         conn.execute(
@@ -225,7 +230,8 @@ class IngestReport:
 
 
 def ingest_universe(conn, universe: dict, fetcher=fetch_csv,
-                    delay_seconds: float = 0.0, source: str = "stooq") -> IngestReport:
+                    delay_seconds: float = 0.0,
+                    source: str = provenance.STOOQ_SOURCE) -> IngestReport:
     """Ingest indices + instruments described by the universe config.
 
     `fetcher` is injectable so tests can supply cached CSV without network.

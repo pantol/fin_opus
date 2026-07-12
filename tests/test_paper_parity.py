@@ -37,7 +37,7 @@ N = 450  # > SMA200 + momentum_6m warmup, small enough to stay fast
 def _ingest(conn, ticker, rows, **inst):
     iid = stooq.upsert_instrument(conn, {"ticker": ticker, "name": ticker, **inst},
                                   is_index=inst.get("is_index", False))
-    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)))
+    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)), source="stooq")
     return iid
 
 

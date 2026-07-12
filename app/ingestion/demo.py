@@ -13,7 +13,7 @@ import datetime as dt
 import hashlib
 import math
 
-from app.ingestion import stooq
+from app.ingestion import provenance, stooq
 
 
 def _seed_for(ticker: str) -> int:
@@ -62,7 +62,8 @@ def ingest_offline(conn, universe: dict, n_days: int = 1200) -> stooq.IngestRepo
         drift = 0.0004 + (seed % 7) * 0.00005
         return _synthetic_csv(ticker, n_days=n_days, base=base, drift=drift)
 
-    return stooq.ingest_universe(conn, universe, fetcher=fetcher, source="demo")
+    return stooq.ingest_universe(conn, universe, fetcher=fetcher,
+                                 source=provenance.DEMO_SOURCE)
 
 
 def _index_tickers(universe: dict) -> set[str]:

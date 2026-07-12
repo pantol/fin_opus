@@ -10,7 +10,7 @@ from tests.conftest import make_stooq_csv, synthetic_series
 def _ingest(conn, ticker, rows):
     inst_id = stooq.upsert_instrument(conn, {"ticker": ticker, "name": ticker})
     bars = stooq.parse_csv(make_stooq_csv(rows))
-    stooq.store_bars(conn, inst_id, bars)
+    stooq.store_bars(conn, inst_id, bars, source="stooq")
     conn.commit()
     return inst_id
 

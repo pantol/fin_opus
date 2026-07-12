@@ -20,7 +20,7 @@ from tests.conftest import make_stooq_csv, synthetic_series
 def _ingest(conn, ticker, rows, **inst):
     iid = stooq.upsert_instrument(conn, {"ticker": ticker, "name": ticker, **inst},
                                   is_index=inst.get("is_index", False))
-    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)))
+    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(rows)), source="stooq")
     return iid
 
 

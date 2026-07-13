@@ -15,6 +15,186 @@ Implemented today:
   The LLM is **only an input**: it can gate entries via YAML, it never sizes
   money, and the backtest itself makes zero LLM calls.
 
+## Step-by-step setup for non-technical users
+
+For an external user with no programming background who wants to run the
+system on their own computer. Two reassurances up front:
+
+- **No real money is involved, ever.** The system only simulates trading
+  ("paper trading") and prints reports; it cannot place orders anywhere.
+- **No accounts, sign-ups, or API keys are needed** for anything in this
+  section. The optional extras (Telegram alerts, LLM features) come later.
+
+You will type commands into a **terminal** — a window where you type a
+command, press Enter, and read what it prints back. Steps 1–6 take about
+15 minutes; step 7 then downloads market data unattended for about an hour.
+
+### Step 1 — install Python
+
+Python is the free language runtime this project runs on.
+
+1. Go to <https://www.python.org/downloads/> and download **Python 3.12**.
+2. Run the installer.
+   - **Windows:** on the first screen, tick **"Add python.exe to PATH"**
+     before clicking Install — forgetting this is the most common mistake.
+   - **macOS:** just click through the installer.
+
+### Step 2 — get the project code
+
+- Easiest (no extra tools): open <https://github.com/pantol/fin_opus>,
+  click the green **Code** button → **Download ZIP**, then unpack the ZIP
+  somewhere you will find it again (e.g. `Documents/fin_opus`).
+- Alternative, if you have git:
+  `git clone https://github.com/pantol/fin_opus.git`
+
+### Step 3 — open a terminal *inside* the project folder
+
+- **Windows:** open the unpacked folder in File Explorer, click the address
+  bar at the top, type `powershell`, press Enter. A terminal opens already
+  pointed at that folder.
+- **macOS:** open the **Terminal** app (Cmd+Space, type "Terminal"), type
+  `cd ` (with a trailing space), drag the unpacked folder onto the Terminal
+  window, press Enter.
+- **Linux:** most file managers offer right-click → "Open Terminal Here".
+
+Every command from here on is typed into this window. First check that
+Python is visible:
+
+```bash
+python3 --version        # macOS / Linux
+py --version             # Windows
+```
+
+You should see something like `Python 3.12.7`. If you get "command not
+found" / "not recognized" instead, redo step 1 (Windows: with the PATH
+checkbox ticked), then close and reopen the terminal.
+
+### Step 4 — install the project (one time)
+
+**macOS / Linux:**
+
+```bash
+make setup
+```
+
+macOS may first ask to install the "command line developer tools" — accept,
+wait, then run `make setup` again.
+
+**Windows (PowerShell):**
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -e ".[dev]"
+```
+
+This creates a private Python environment in a `.venv` folder **inside the
+project** and installs all libraries into it. Nothing is installed
+system-wide; deleting the project folder later removes everything.
+
+> **Windows note for all later steps:** the `make <name>` commands used in
+> this README are macOS/Linux shorthands. On Windows run the underlying
+> command instead — see the [Windows command table](#windows-command-table)
+> below.
+
+### Step 5 — verify the installation
+
+```bash
+make test                # Windows: .venv\Scripts\python -m pytest
+```
+
+This runs the project's full self-check (~20 seconds). The last line should
+say `307 passed` (the exact number grows over time) and — importantly — no
+`failed`.
+
+### Step 6 — instant dry run on fake data (optional, ~1 minute)
+
+```bash
+make backtest-offline    # Windows: see the command table below
+```
+
+This exercises the entire pipeline — data → features → strategy → risk →
+walk-forward backtest — on **synthetic demo prices** (NOT real market data,
+kept in its own separate `data/demo.db`), so you can see what the output
+looks like before waiting for the real download.
+
+### Step 7 — download the real market data (one time, ~1 hour)
+
+```bash
+make backfill            # Windows: see the command table below
+```
+
+This politely (~1 request per second) downloads the official GPW price
+archive from 2015 to today. Leave it running in the background; it is safe
+to interrupt and re-run — it resumes where it stopped. From then on you
+only ever top up with:
+
+```bash
+make ingest              # seconds per day of new data; today's bar appears
+                         # after ~18:00 Warsaw time
+```
+
+### Step 8 — run the real backtest
+
+```bash
+make backtest
+```
+
+This prints the performance metrics (return, Sharpe, max drawdown, …) of
+the configured strategy versus the WIG20TR index, simulated out-of-sample
+with realistic trading costs.
+
+### Everyday use after setup
+
+```bash
+make ingest              # top up prices
+make backtest            # re-run the simulation on fresh data
+make signals             # optional: the daily paper-trading loop (see below)
+```
+
+Optional extras need keys in a settings file: copy `.env.example` to a file
+named `.env` (macOS/Linux: `cp .env.example .env`, Windows:
+`copy .env.example .env`) and fill in only what you want — a Telegram bot
+token for alerts, an OpenRouter key for the Phase-2 LLM features. With an
+empty or missing `.env` everything above still works.
+
+### Windows command table
+
+| README says | Run in PowerShell instead |
+|---|---|
+| `make test` | `.venv\Scripts\python -m pytest` |
+| `make backfill` | `.venv\Scripts\python -m app.cli ingest --full --start 2015-01-02` |
+| `make ingest` | `.venv\Scripts\python -m app.cli ingest` |
+| `make backtest` | `.venv\Scripts\python -m app.cli ingest` then `.venv\Scripts\python -m app.cli backtest` |
+| `make backtest-offline` | `.venv\Scripts\python -m app.cli --db data/demo.db ingest --offline` then `.venv\Scripts\python -m app.cli --db data/demo.db backtest` |
+| `make signals` | `.venv\Scripts\python -m app.cli ingest` then `.venv\Scripts\python -m app.cli signals` |
+
+Anything else: open the file named `Makefile` in a text editor — every
+`make` name is shorthand for the one or two plain commands listed under it
+(run them with `.venv\Scripts\python` instead of `$(PYTHON)`).
+
+### If something goes wrong
+
+- **"python3: command not found" / "'py' is not recognized"** — Python is
+  not installed or not on PATH. Redo step 1; on Windows tick the PATH
+  checkbox; close and reopen the terminal.
+- **"make: command not found" (macOS)** — accept the "command line
+  developer tools" pop-up, or run `xcode-select --install`, then retry.
+- **`pip install` fails while building `curl_cffi` or `xlrd`** — your
+  Python version has no prebuilt packages (too new or too old). Install
+  Python 3.12 as in step 1 and redo step 4.
+- **`make ingest` refuses to run, mentioning demo/real data mixing** —
+  intentional: fake demo prices and real prices are kept in separate
+  database files. The error message names the exact command to fix it.
+- **Start over with the data** — delete `data/gpw.db` and repeat step 7.
+  Only do this if you never ran the news collector (`make collect-loop`):
+  collected filings live in the same file and **cannot be re-downloaded**
+  — run `make backup` first if in doubt. Prices themselves are always
+  re-downloadable.
+
+That is the whole setup. The rest of this README is the detailed reference
+for every command.
+
 ## How to run
 
 ### 1. One-time setup
@@ -29,7 +209,7 @@ cp .env.example .env            # then fill in the secrets you need (all optiona
                                 #   OPENROUTER_API_KEY  - only for `make llm`
                                 #   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID - optional alerts
                                 #   R2_* / HEALTHCHECK_URL_* - deployment (backups, health)
-make test                       # 246 tests: money math, point-in-time, fills, LLM contracts
+make test                       # 307 tests: money math, point-in-time, fills, LLM contracts
 ```
 
 The CLI auto-loads a local `.env` at startup; any variable already exported in
@@ -300,7 +480,7 @@ config/
   llm.yaml              # models, pinned providers, caching (Phase 2)
   news_sources.yaml     # live-verified RSS feeds + per-feed timezone quirks
   strategies/*.yaml     # one engine runs any strategy config
-tests/                  # 246 tests: features, point-in-time, risk, fills, metrics,
+tests/                  # 307 tests: features, point-in-time, risk, fills, metrics,
                         # collector, LLM contracts, A/B, reproducibility, e2e
 ```
 

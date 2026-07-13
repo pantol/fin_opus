@@ -92,8 +92,8 @@ def test_ingest_universe_one_failure_does_not_abort_the_rest(conn):
 def test_store_bars_is_idempotent(conn):
     inst_id = stooq.upsert_instrument(conn, {"ticker": "tst", "name": "Test"})
     bars = stooq.parse_csv(make_stooq_csv([("2020-01-02", 10, 11, 9, 10, 500)]))
-    stooq.store_bars(conn, inst_id, bars)
-    stooq.store_bars(conn, inst_id, bars)  # again
+    stooq.store_bars(conn, inst_id, bars, source="stooq")
+    stooq.store_bars(conn, inst_id, bars, source="stooq")  # again
     n = conn.execute("SELECT COUNT(*) FROM prices WHERE instrument_id=?", (inst_id,)).fetchone()[0]
     assert n == 1
 

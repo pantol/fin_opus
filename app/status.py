@@ -55,10 +55,20 @@ def run_status(conn, backup_cfg: dict, *, now: datetime | None = None) -> Status
 
     # --- prices freshness (informational; ingest cadence is manual/daily) ---
     row = conn.execute(
-        "SELECT MAX(date) AS d, COUNT(*) AS n FROM prices WHERE adjusted = 0"
+        "SELECT MAX(date) AS d, COUNT(*) AS n, "
+        "SUM(CASE WHEN source = 'demo' THEN 1 ELSE 0 END) AS demo_n "
+        "FROM prices WHERE adjusted = 0"
     ).fetchone()
     if row and row["d"]:
-        report.lines.append(f"prices: {row['n']} bars, last session {row['d']}")
+        line = f"prices: {row['n']} bars, last session {row['d']}"
+        if row["demo_n"]:
+            # Demo bars in the MONITORED database are always anomalous (demo
+            # runs live in data/demo.db) — page the operator, don't just log.
+            line += f" [WARNING: {row['demo_n']} DEMO bars — synthetic, NOT real prices]"
+            report.stale.append(
+                f"baza zawiera {row['demo_n']} syntetycznych barow DEMO "
+                "(to nie sa prawdziwe ceny) — uruchom purge-demo")
+        report.lines.append(line)
     else:
         report.lines.append("prices: EMPTY — run `make ingest`")
         report.stale.append("brak danych cenowych")

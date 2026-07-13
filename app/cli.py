@@ -21,40 +21,10 @@ import yaml
 from app import config as cfg
 from app.backtest import ab_harness, engine
 from app.db import connect, init_db
-from app.ingestion import demo, stooq
+from app.ingestion import demo, provenance, stooq
 from app.logging import decisions as declog
 from app.paper import loop as paper_loop
 from app.paper.store import PAPER_PREFIX
-
-
-def _load_dotenv(path: str = ".env") -> None:
-    """Load KEY=VALUE pairs from a local `.env` into os.environ (shell env wins).
-
-    Zero-dependency by design: the project keeps its dependency surface small.
-    Only sets keys NOT already present in the environment, so an explicit shell
-    export always overrides the file. Silently no-ops if `.env` is absent (it is
-    optional and .gitignored). Handles blank lines, `#` comments, an optional
-    `export ` prefix, and single/double-quoted values.
-    """
-    if not os.path.exists(path):
-        return
-    try:
-        with open(path, encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export "):]
-                key, sep, value = line.partition("=")
-                if not sep:
-                    continue
-                key, value = key.strip(), value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                os.environ.setdefault(key, value)
-    except OSError:
-        return
 
 
 def cmd_ingest(args) -> int:
@@ -64,35 +34,45 @@ def cmd_ingest(args) -> int:
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
-    if args.offline:
-        print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
-        report = demo.ingest_offline(conn, universe)
-    elif args.source == "stooq":
-        print("Ingesting from Stooq (this hits the network)...")
-        report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
-    else:  # gpw (default): official session archive + GPW Benchmark indices
-        from app.ingestion import gpw_archive
+    try:
+        # Guard FIRST — before the incremental early-return below, so a mixed
+        # database is refused (exit 2) even on a day with nothing to ingest.
+        # Also takes the write lock, closing the concurrent-ingest race.
+        provenance.assert_no_mixing(
+            conn, provenance.DEMO_SOURCE if args.offline else args.source)
+        if args.offline:
+            print("Ingesting DETERMINISTIC DEMO DATA (offline, NOT real prices)...")
+            report = demo.ingest_offline(conn, universe)
+        elif args.source == "stooq":
+            print("Ingesting from Stooq (this hits the network)...")
+            report = stooq.ingest_universe(conn, universe, delay_seconds=1.0)
+        else:  # gpw (default): official session archive + GPW Benchmark indices
+            from app.ingestion import gpw_archive
 
-        end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
-            datetime.now(ZoneInfo("Europe/Warsaw")))
-        if args.start:
-            start = date.fromisoformat(args.start)
-        else:
-            # Incremental: resume after the last stored bar; fresh DB -> 90 days.
-            row = conn.execute(
-                "SELECT MAX(date) FROM prices WHERE adjusted = 0").fetchone()
-            start = (date.fromisoformat(row[0]) + timedelta(days=1)
-                     if row and row[0] else end - timedelta(days=90))
-        if start > end:
-            print(f"Already up to date (last bar {start - timedelta(days=1)}).")
-            conn.close()
-            return 0
-        n_days = (end - start).days + 1
-        print(f"Ingesting from GPW archive: {start} .. {end} "
-              f"({n_days} calendar days, ~1 request/session day"
-              f"{', FULL market' if args.full else ', universe only'})...")
-        report = gpw_archive.ingest_range(conn, universe, start, end,
-                                          full_market=args.full)
+            end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
+                datetime.now(ZoneInfo("Europe/Warsaw")))
+            if args.start:
+                start = date.fromisoformat(args.start)
+            else:
+                # Incremental: resume after the last stored REAL bar (demo rows
+                # never anchor a live backfill); fresh DB -> 90 days.
+                last = provenance.last_real_bar_date(conn)
+                start = (date.fromisoformat(last) + timedelta(days=1)
+                         if last else end - timedelta(days=90))
+            if start > end:
+                print(f"Already up to date (last bar {start - timedelta(days=1)}).")
+                conn.close()
+                return 0
+            n_days = (end - start).days + 1
+            print(f"Ingesting from GPW archive: {start} .. {end} "
+                  f"({n_days} calendar days, ~1 request/session day"
+                  f"{', FULL market' if args.full else ', universe only'})...")
+            report = gpw_archive.ingest_range(conn, universe, start, end,
+                                              full_market=args.full)
+    except provenance.DataMixingError as exc:
+        print(f"ERROR: {exc}")
+        conn.close()
+        return 2
     total = sum(report.counts.values())
     print(f"Ingested {total} bars across {len(report.counts)} tickers.")
     for tk, n in sorted(report.counts.items()):
@@ -101,26 +81,12 @@ def cmd_ingest(args) -> int:
         print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
         for tk, reason in sorted(report.failures.items()):
             print(f"  {tk:10s} {reason}")
-        # Demo data cannot fail today; the guard keeps any future demo
-        # failure mode from being blamed on the network.
-        if not report.counts and not args.offline:
-            retry = ("Retry later from a normal connection, or use: "
-                     "python -m app.cli ingest --offline  (demo data only).")
-            if args.source == "stooq":
-                print("\nStooq is refusing automated CSV access from this "
-                      "network (bot-check / 'Access denied' / daily limit).")
-                print(retry)
-            elif any(k.startswith("session:") for k in report.failures):
-                print("\nGPW archive requests are failing (gpw.pl WAF/"
-                      "bot-check, network outage, or the site is down).")
-                print(retry)
-            elif report.sessions == 0:
-                print("\nNo trading sessions in the requested window "
-                      "(weekend/holiday) — nothing to ingest yet.")
-            else:
-                print("\nSession files downloaded, but no bars matched the "
-                      "configured universe (check `isin` fields in "
-                      "config/universe.yaml).")
+        if not report.counts:
+            print("\nStooq is refusing automated CSV access from this network "
+                  "(bot-check / 'Access denied' / daily limit).")
+            print("Retry later from a normal connection, or use: "
+                  "make ingest-offline  (deterministic demo data in its own "
+                  "database, data/demo.db).")
         conn.close()
         return 2
     conn.close()
@@ -139,6 +105,52 @@ def _default_ingest_end(now_warsaw):
     from datetime import timedelta
     today = now_warsaw.date()
     return today if now_warsaw.hour >= 18 else today - timedelta(days=1)
+
+
+# Everything derived from prices, in FK-safe deletion order (referencing
+# tables before decisions). Wiped by purge-demo when the database never held
+# real prices: every one of these rows then described synthetic data.
+_DERIVED_TABLES = ("paper_orders", "overrides", "trades", "decisions",
+                   "positions", "equity_curve", "paper_state", "strategy_trials")
+
+
+def cmd_purge_demo(args) -> int:
+    """Delete demo price rows AND, on a demo-only DB, everything derived.
+
+    Demo rows are synthetic and carry no information, so deleting them is
+    always safe. If the database never held real prices, every derived row
+    (decisions, trades, equity, trials, paper state) described fake data too
+    and is wiped with them — otherwise demo trials would keep polluting the
+    Deflated Sharpe of future REAL backtests and a demo-anchored paper state
+    would wedge the loop. If real rows DO remain (a pre-guard mixed database),
+    derived rows cannot be attributed and are left with a warning.
+    """
+    conn = connect(args.db)
+    init_db(conn)
+    n = conn.execute("DELETE FROM prices WHERE source = ?",
+                     (provenance.DEMO_SOURCE,)).rowcount
+    if not n:
+        conn.commit()
+        print("No demo price rows found; nothing to purge.")
+        conn.close()
+        return 0
+    wiped: dict[str, int] = {}
+    if not provenance.real_rows_present(conn):
+        for table in _DERIVED_TABLES:
+            count = conn.execute(f"DELETE FROM {table}").rowcount  # noqa: S608 - fixed table list
+            if count:
+                wiped[table] = count
+    conn.commit()
+    print(f"Purged {n} demo price rows.")
+    if wiped:
+        print("Also cleared demo-derived state: "
+              + ", ".join(f"{t} ({c})" for t, c in wiped.items()) + ".")
+    elif provenance.real_rows_present(conn):
+        print("Real price rows remain, so derived results were kept — but any "
+              "decisions/trades/equity/trials/paper state created while demo "
+              "data was present described fake prices; review them manually.")
+    conn.close()
+    return 0
 
 
 def cmd_features(args) -> int:
@@ -723,7 +735,7 @@ def _print_metrics_table(result, benchmark_name: str) -> None:
 
 
 def main(argv=None) -> int:
-    _load_dotenv()  # consume a local .env (shell exports still take precedence)
+    cfg.load_dotenv()  # consume a local .env (shell exports still take precedence)
     parser = argparse.ArgumentParser(prog="app.cli", description="GPW deterministic core")
     parser.add_argument("--db", default=None, help="SQLite path (default: data/gpw.db)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -731,15 +743,19 @@ def main(argv=None) -> int:
     ing = sub.add_parser("ingest", help="Fetch EOD data into SQLite (GPW archive by default)")
     ing.add_argument("--offline", action="store_true",
                      help="Use deterministic DEMO data instead of a live source (NOT real prices)")
-    ing.add_argument("--source", choices=["gpw", "stooq"], default="gpw",
+    ing.add_argument("--source", choices=list(provenance.REAL_SOURCES),
+                     default=provenance.GPW_SOURCE,
                      help="Live source: GPW official archive (default) or Stooq CSV "
                           "(login-gated as of 2026)")
     ing.add_argument("--start", default=None,
-                     help="Backfill start date (ISO). Default: resume after the last stored bar")
+                     help="Backfill start date (ISO). Default: resume after the "
+                          "last stored real (non-demo) bar")
     ing.add_argument("--end", default=None, help="End date (ISO). Default: today (Warsaw)")
     ing.add_argument("--full", action="store_true",
                      help="GPW source: store EVERY PLN instrument found (anti-survivorship "
                           "backfill), not just the configured universe")
+    sub.add_parser("purge-demo",
+                   help="Delete demo (synthetic) price rows so real ingestion can proceed")
     sub.add_parser("features", help="Compute and preview features")
     bt = sub.add_parser("backtest", help="Run walk-forward backtest vs WIG20TR")
     bt.add_argument("--strategy", default="trend_momentum")
@@ -793,6 +809,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.command == "ingest":
         return cmd_ingest(args)
+    if args.command == "purge-demo":
+        return cmd_purge_demo(args)
     if args.command == "features":
         return cmd_features(args)
     if args.command == "backtest":

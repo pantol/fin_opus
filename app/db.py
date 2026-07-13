@@ -10,8 +10,16 @@ import sqlite3
 from pathlib import Path
 
 from app.config import DEFAULT_DB_PATH
+from app.ingestion.provenance import DEMO_SOURCE, VALID_SOURCES
 
-SCHEMA = """
+# Derived from the single vocabulary owner (app.ingestion.provenance) so the
+# schema CHECK and the guard cannot drift. Note: SQLite cannot ALTER a CHECK,
+# so extending the vocabulary later requires a table rebuild for existing
+# databases — an accepted cost; silent bad provenance is worse.
+_SOURCE_CHECK = "CHECK (source IN ({}))".format(
+    ", ".join(f"'{s}'" for s in VALID_SOURCES))
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS instruments (
     id           INTEGER PRIMARY KEY,
     ticker       TEXT NOT NULL UNIQUE,
@@ -26,6 +34,8 @@ CREATE TABLE IF NOT EXISTS instruments (
 
 -- as_of_date = the date the row became publicly available (NOT the period it describes).
 -- raw vs adjusted prices are stored separately and flagged via `adjusted`.
+-- `source` is row provenance: demo rows are synthetic fakes and must never
+-- share a database with real ('gpw'/'stooq') rows — see app.ingestion.provenance.
 CREATE TABLE IF NOT EXISTS prices (
     instrument_id INTEGER NOT NULL REFERENCES instruments(id),
     date          TEXT NOT NULL,    -- bar date (ISO)
@@ -36,6 +46,10 @@ CREATE TABLE IF NOT EXISTS prices (
     close         REAL,
     volume        REAL,
     adjusted      INTEGER NOT NULL DEFAULT 0,   -- boolean (0/1)
+    -- no DEFAULT on purpose: every writer must name the provenance explicitly,
+    -- or the INSERT fails (a silent default would mint fake 'real' rows).
+    -- Only the ALTER in _migrate carries a DEFAULT (required for ADD COLUMN).
+    source        TEXT NOT NULL {_SOURCE_CHECK},
     PRIMARY KEY (instrument_id, date, adjusted)
 );
 CREATE INDEX IF NOT EXISTS idx_prices_asof ON prices(instrument_id, as_of_date, adjusted);
@@ -323,6 +337,11 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_instruments_isin ON instruments(isin)")
+    # After _migrate: on a pre-`source` database this index can only be
+    # created once the column exists. Serves the provenance existence probes
+    # and the per-source MAX(date) of the incremental resume.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_source "
+                 "ON prices(source, adjusted, date)")
     conn.commit()
     from app.ingestion import filings_db  # local import: keep app.db import-light
 
@@ -344,6 +363,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     if not column_exists(conn, "instruments", "isin"):
         conn.execute("ALTER TABLE instruments ADD COLUMN isin TEXT")
+    if not column_exists(conn, "prices", "source"):
+        # Pre-existing rows are assumed REAL and labelled 'gpw' (mislabelling
+        # stooq as gpw is harmless — both are real; the guard only separates
+        # demo from real). The DEFAULT exists only because SQLite requires one
+        # for a NOT NULL ADD COLUMN; fresh databases get no default.
+        conn.execute(
+            "ALTER TABLE prices ADD COLUMN source TEXT NOT NULL DEFAULT 'gpw' "
+            + _SOURCE_CHECK
+        )
+        # Pre-migration DEMO bars ARE detectable: the generator hardcodes a
+        # 2015-01-01 start, and GPW was closed that day (New Year) — no real
+        # ingest can ever produce a 2015-01-01 bar. Relabel such instruments
+        # wholesale; conservative in the safe direction (a real bar mislabelled
+        # demo is re-ingestable after purge-demo; a demo bar mislabelled real
+        # would silently anchor fake history — the bug this column prevents).
+        cur = conn.execute(
+            "UPDATE prices SET source = ? WHERE instrument_id IN ("
+            " SELECT DISTINCT instrument_id FROM prices"
+            " WHERE date = '2015-01-01' AND adjusted = 0)",
+            (DEMO_SOURCE,),
+        )
+        if cur.rowcount:
+            print(f"NOTE: relabelled {cur.rowcount} pre-existing price rows as "
+                  "DEMO (their instruments hold a 2015-01-01 bar, which only "
+                  "the synthetic demo generator produces — GPW was closed that "
+                  "day). Run `python -m app.cli purge-demo` before real ingest.")
     if column_exists(conn, "llm_features", "llm_score") and not column_exists(
             conn, "llm_features", "relevance"):
         conn.execute("ALTER TABLE llm_features ADD COLUMN relevance TEXT")

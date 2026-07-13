@@ -223,6 +223,10 @@ class IngestReport:
     """Outcome of a universe ingest: per-ticker bar counts and failures."""
     counts: dict[str, int] = field(default_factory=dict)    # ticker -> bars stored
     failures: dict[str, str] = field(default_factory=dict)  # ticker -> reason
+    # Session-file days successfully fetched; None for sources without the
+    # concept (Stooq/demo). 0 with no fetch errors means the requested window
+    # simply had no trading days.
+    sessions: int | None = None
 
     @property
     def ok(self) -> bool:

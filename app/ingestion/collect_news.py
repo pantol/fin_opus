@@ -92,6 +92,10 @@ def run_loop(config: dict | None = None) -> int:
 
 
 def main(argv=None) -> int:
+    # Same .env handling as app.cli: under the documented cron/systemd setup
+    # HEALTHCHECK_URL_COLLECT lives in /opt/fin_opus/.env, so without this the
+    # dead-man's-switch ping would silently never fire.
+    cfg.load_dotenv()
     _setup_logging()
     parser = argparse.ArgumentParser(
         prog="app.ingestion.collect_news",

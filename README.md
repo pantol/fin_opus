@@ -430,6 +430,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/opt/fin_opus
+EnvironmentFile=-/opt/fin_opus/.env
 ExecStart=/opt/fin_opus/.venv/bin/python -m app.ingestion.collect_news --loop
 Restart=always
 RestartSec=30
@@ -447,7 +448,7 @@ Description=GPW DB backup (snapshot -> R2 -> retention)
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/fin_opus
-EnvironmentFile=/opt/fin_opus/.env
+EnvironmentFile=-/opt/fin_opus/.env
 ExecStart=/opt/fin_opus/.venv/bin/python -m app.cli backup
 
 # /etc/systemd/system/gpw-backup.timer
@@ -465,7 +466,7 @@ Description=GPW deployment status check (alerts when stale)
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/fin_opus
-EnvironmentFile=/opt/fin_opus/.env
+EnvironmentFile=-/opt/fin_opus/.env
 ExecStart=/opt/fin_opus/.venv/bin/python -m app.cli status
 
 # /etc/systemd/system/gpw-status.timer

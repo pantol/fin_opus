@@ -82,11 +82,27 @@ def cmd_ingest(args) -> int:
         for tk, reason in sorted(report.failures.items()):
             print(f"  {tk:10s} {reason}")
         if not report.counts:
-            print("\nStooq is refusing automated CSV access from this network "
-                  "(bot-check / 'Access denied' / daily limit).")
-            print("Retry later from a normal connection, or use: "
-                  "make ingest-offline  (deterministic demo data in its own "
-                  "database, data/demo.db).")
+            # Zero bars stored: diagnose the actual cause (network vs calendar
+            # vs config vs source) instead of a blanket network accusation.
+            retry_hint = ("Retry later from a normal connection, or use: "
+                          "make ingest-offline  (deterministic demo data in "
+                          "its own database, data/demo.db).")
+            if report.sessions is None:
+                # Stooq/demo report no session-file concept.
+                print("\nStooq is refusing automated CSV access from this "
+                      "network (bot-check / 'Access denied' / daily limit).")
+                print(retry_hint)
+            elif any(t.startswith("session:") for t in report.failures):
+                print("\nGPW archive requests are failing "
+                      "(network problem or WAF block on this connection).")
+                print(retry_hint)
+            elif report.sessions == 0:
+                print("\nNo trading sessions in the requested window — "
+                      "nothing to ingest (weekend/holiday range).")
+            else:
+                print("\nSession files downloaded, but no bars matched the "
+                      "configured universe — check the ISINs in "
+                      "config/universe.yaml.")
         conn.close()
         return 2
     conn.close()

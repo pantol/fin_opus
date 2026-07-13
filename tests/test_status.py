@@ -22,7 +22,7 @@ def _cfg(tmp_path, collector_stale_minutes=120, backup_stale_hours=36):
 
 def _seed_prices(conn):
     iid = stooq.upsert_instrument(conn, {"ticker": "aaa", "name": "aaa"})
-    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(synthetic_series(n=10))))
+    stooq.store_bars(conn, iid, stooq.parse_csv(make_stooq_csv(synthetic_series(n=10))), source="stooq")
     conn.commit()
 
 

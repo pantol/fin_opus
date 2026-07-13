@@ -13,7 +13,7 @@ import datetime as dt
 import hashlib
 import math
 
-from app.ingestion import stooq
+from app.ingestion import provenance, stooq
 
 
 def _seed_for(ticker: str) -> int:
@@ -46,7 +46,13 @@ def _synthetic_csv(ticker: str, n_days: int, base: float, drift: float) -> str:
 
 
 def ingest_offline(conn, universe: dict, n_days: int = 1200) -> stooq.IngestReport:
-    """Populate the DB with deterministic demo data for the whole universe."""
+    """Populate the DB with deterministic demo data for the whole universe.
+
+    Rows are stored with source='demo'. A database that already holds real
+    ('gpw'/'stooq') rows is refused (provenance.DataMixingError) — demo bars
+    use the REAL universe tickers, and once mixed in, the incremental live
+    ingest would silently extend fake history with real bars.
+    """
     base_map_default = 100.0
 
     def fetcher(ticker: str) -> str:
@@ -56,7 +62,8 @@ def ingest_offline(conn, universe: dict, n_days: int = 1200) -> stooq.IngestRepo
         drift = 0.0004 + (seed % 7) * 0.00005
         return _synthetic_csv(ticker, n_days=n_days, base=base, drift=drift)
 
-    return stooq.ingest_universe(conn, universe, fetcher=fetcher)
+    return stooq.ingest_universe(conn, universe, fetcher=fetcher,
+                                 source=provenance.DEMO_SOURCE)
 
 
 def _index_tickers(universe: dict) -> set[str]:

@@ -3,6 +3,11 @@
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
 
+# Demo (synthetic) data lives in its OWN database: the provenance guard
+# refuses to mix demo and real bars in one file, so the offline targets must
+# never touch the real data/gpw.db.
+DEMO_DB ?= data/demo.db
+
 setup:
 	python3 -m venv .venv
 	.venv/bin/python -m pip install --upgrade pip
@@ -15,7 +20,7 @@ ingest:
 	$(PYTHON) -m app.cli ingest
 
 ingest-offline:
-	$(PYTHON) -m app.cli ingest --offline
+	$(PYTHON) -m app.cli --db $(DEMO_DB) ingest --offline
 
 # Deep anti-survivorship backfill from the GPW archive: every PLN instrument
 # in every session file (dead companies included). ~1 request/second per
@@ -42,16 +47,17 @@ backtest: ingest
 	$(PYTHON) -m app.cli backtest
 
 # Same chain but with deterministic DEMO data (offline; NOT real prices).
+# Runs entirely against $(DEMO_DB) so it works alongside a real data/gpw.db.
 backtest-offline: ingest-offline
-	$(PYTHON) -m app.cli backtest
+	$(PYTHON) -m app.cli --db $(DEMO_DB) backtest
 
 # A/B: baseline vs baseline+LLM (reads pre-materialized LLM features; no LLM call).
 ab:
 	$(PYTHON) -m app.cli ab
 
-# A/B on deterministic DEMO data (offline; NOT real prices).
+# A/B on deterministic DEMO data (offline; NOT real prices). Uses $(DEMO_DB).
 ab-offline: ingest-offline
-	$(PYTHON) -m app.cli ab
+	$(PYTHON) -m app.cli --db $(DEMO_DB) ab
 
 # Materialize point-in-time LLM features from collected filings (calls
 # OpenRouter; needs OPENROUTER_API_KEY). backtest/ab then read the

@@ -28,6 +28,7 @@ import pandas as pd
 from app.alerts import telegram
 from app.backtest import engine
 from app.features import compute
+from app.ingestion import provenance
 from app.logging import decisions as declog
 from app.paper import store
 from app.risk import manager as risk
@@ -147,6 +148,18 @@ def run_signals(
         return EXIT_REFUSED, report
 
     conn.execute("PRAGMA busy_timeout = 30000")
+
+    # The paper track record exists to be honest evidence; a database holding
+    # DEMO (synthetic) bars must never seed or extend it. Gate BEFORE any
+    # state is created — this also covers `--session`, which deliberately
+    # skips the staleness gate and would otherwise happily replay demo data.
+    if provenance.demo_rows_present(conn):
+        report.reason = ("price data contains DEMO (synthetic) bars — the paper "
+                         "track record runs on real data only; keep demo runs in "
+                         "their own database (data/demo.db) or run "
+                         "`python -m app.cli purge-demo`")
+        _alert_refusal(send_fn, report.reason, dry_run)
+        return EXIT_REFUSED, report
 
     # --- load the exact universe/feature pipeline the backtest uses ----------
     bench = universe["benchmark"]["ticker"]

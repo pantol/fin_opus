@@ -15,25 +15,26 @@ def _seed_db(conn):
         conn, {"ticker": "wig20tr", "name": "WIG20TR"}, is_index=True
     )
     stooq.store_bars(conn, bench_id,
-                     stooq.parse_csv(make_stooq_csv(synthetic_series(n=900, base=2000, drift=0.0005))))
+                     stooq.parse_csv(make_stooq_csv(synthetic_series(n=900, base=2000, drift=0.0005))),
+                     source="stooq")
 
     # tradable instruments
     rows_a = synthetic_series(n=900, base=100.0, drift=0.0008)
     a_id = stooq.upsert_instrument(conn, {"ticker": "aaa", "name": "AAA", "sector": "tech",
                                           "listed_from": rows_a[0][0]})
-    stooq.store_bars(conn, a_id, stooq.parse_csv(make_stooq_csv(rows_a)))
+    stooq.store_bars(conn, a_id, stooq.parse_csv(make_stooq_csv(rows_a)), source="stooq")
 
     rows_b = synthetic_series(n=900, base=50.0, drift=0.0006)
     b_id = stooq.upsert_instrument(conn, {"ticker": "bbb", "name": "BBB", "sector": "banking",
                                           "listed_from": rows_b[0][0]})
-    stooq.store_bars(conn, b_id, stooq.parse_csv(make_stooq_csv(rows_b)))
+    stooq.store_bars(conn, b_id, stooq.parse_csv(make_stooq_csv(rows_b)), source="stooq")
 
     # delisted ticker (anti-survivorship): stops trading partway through
     rows_c = synthetic_series(n=400, base=30.0, drift=0.0003)
     c_id = stooq.upsert_instrument(conn, {"ticker": "ccc", "name": "CCC", "sector": "energy",
                                           "listed_from": rows_c[0][0],
                                           "delisted_on": rows_c[-1][0]})
-    stooq.store_bars(conn, c_id, stooq.parse_csv(make_stooq_csv(rows_c)))
+    stooq.store_bars(conn, c_id, stooq.parse_csv(make_stooq_csv(rows_c)), source="stooq")
     conn.commit()
 
 

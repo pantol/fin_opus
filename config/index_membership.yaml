@@ -1,30 +1,224 @@
 # Point-in-time index membership (loaded into the index_membership table by
 # `python -m app.cli refdata`). The backtest universe for date T = members as
 # of T, so revisions must carry the REAL effective dates from GPW announcements
-# (annual/quarterly reviews), not today's composition.
+# (annual revision after the 3rd Friday of March, quarterly corrections in
+# June/September/December, plus fast-track and corporate-event changes).
 #
 # This file is AUTHORITATIVE: reloading replaces each listed index's rows
 # wholesale, so corrections and deletions here actually take effect in the DB.
 #
-# PLACEHOLDERS: date_from values below mark each ticker's earliest bar in the
-# current dataset, NOT real revision dates. Replace them with actual dates from
-# GPW index committee announcements before gating a backtest on membership.
+# Provenance: reconstructed 2026-07-13 from Bossa's (DM BOS) archival
+# point-in-time API — monthly snapshots 2015-01-02..2026-07-10, then daily
+# bisection to the exact sessions: date_from = first session the instrument
+# appears in the index table, date_to = last session it appears. Each entry's
+# source URL returns the constituents on the entry's date_from and is the
+# join-side evidence (the exit side is the same query at date_to vs the next
+# session). Verified against known events: CDPROJEKT in at the 2018-03 annual
+# revision, ALLEGRO fast-tracked in 2020-10 (MBANK out), MERCATOR in 2021-03 /
+# out 2022-03, LOTOS out 2022-08 (Orlen merger), PGNIG out 2022-11 (same),
+# ZABKA in at the 2025-03 revision.
+#
+# WINDOW CLAMP: members already in the index at the window start carry
+# date_from = 2015-01-02 (the dataset's first session); their real join dates
+# are earlier. Ranges spanning an issuer re-registration (AmRest NL->ES ISIN
+# swap, 2018) are merged onto the single instrument.
+#
+# Delisted former members must STAY here with their real date ranges —
+# removing them reintroduces survivorship bias.
 #
 # Fields per entry:
-#   ticker     — must exist in the instruments table (lowercase, as in universe.yaml)
+#   ticker     — must exist in the instruments table (curated short tickers
+#                from universe.yaml, else the backfill's lowercased-ISIN ticker)
 #   date_from  — first session of membership (ISO)
 #   date_to    — last session of membership (ISO); omit while still a member
-#   source     — where the dates come from (announcement URL / "placeholder")
+#   source     — point-in-time evidence for the range (Bossa archival query)
 
 indices:
   wig20:
-    - {ticker: pkn, date_from: 2015-01-02, source: placeholder}
-    - {ticker: pko, date_from: 2015-01-02, source: placeholder}
-    - {ticker: pzu, date_from: 2015-01-02, source: placeholder}
-    - {ticker: peo, date_from: 2015-01-02, source: placeholder}
-    - {ticker: kgh, date_from: 2015-01-02, source: placeholder}
-    - {ticker: cdr, date_from: 2015-01-02, source: placeholder}
-    - {ticker: lpp, date_from: 2015-01-02, source: placeholder}
-    # Delisted former members must STAY here with their real date ranges —
-    # removing them reintroduces survivorship bias.
-    - {ticker: gnb, date_from: 2015-01-02, date_to: 2019-03-15, source: placeholder}
+    - {ticker: alr, date_from: 2015-01-02, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # ALIOR
+    - {ticker: alr, date_from: 2023-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2023-03-20"}  # ALIOR
+    - {ticker: ccc, date_from: 2015-12-21, date_to: 2023-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-12-21"}  # MODIVO
+    - {ticker: ccc, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2025-03-24"}  # MODIVO
+    - {ticker: cdr, date_from: 2018-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2018-03-19"}  # CDPROJEKT
+    - {ticker: dnp, date_from: 2019-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2019-03-18"}  # DINOPL
+    - {ticker: kgh, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # KGHM
+    - {ticker: lpp, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # LPP
+    - {ticker: lu0327357389, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # KERNEL
+    - {ticker: lu1642887738, date_from: 2019-03-18, date_to: 2020-11-26, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2019-03-18"}  # PLAY
+    - {ticker: lu2237380790, date_from: 2020-10-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2020-10-15"}  # ALLEGRO
+    - {ticker: lu2910446546, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2025-03-24"}  # ZABKA
+    - {ticker: nl0015000au7, date_from: 2022-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2022-03-21"}  # PEPCO
+    - {ticker: opl, date_from: 2015-01-02, date_to: 2026-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # ORANGEPL
+    - {ticker: peo, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PEKAO
+    - {ticker: pkn, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PKNORLEN
+    - {ticker: pko, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PKOBP
+    - {ticker: plbre0000012, date_from: 2015-01-02, date_to: 2020-10-14, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # MBANK
+    - {ticker: plbre0000012, date_from: 2022-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2022-03-21"}  # MBANK
+    - {ticker: plbudmx00013, date_from: 2024-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2024-03-18"}  # BUDIMEX
+    - {ticker: plcfrpt00013, date_from: 2015-03-23, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-03-23"}  # CYFRPLSAT
+    - {ticker: pldwory00019, date_from: 2015-01-02, date_to: 2016-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # SYNTHOS
+    - {ticker: plenea000013, date_from: 2015-03-23, date_to: 2017-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-03-23"}  # ENEA
+    - {ticker: plenerg00022, date_from: 2015-03-23, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-03-23"}  # ENERGA
+    - {ticker: pleurch00011, date_from: 2015-01-02, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # EUROCASH
+    - {ticker: pljsw0000015, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # JSW
+    - {ticker: pljsw0000015, date_from: 2017-03-20, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2017-03-20"}  # JSW
+    - {ticker: plkety000011, date_from: 2022-08-04, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2022-08-04"}  # KETY
+    - {ticker: plkrk0000010, date_from: 2022-11-07, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2022-11-07"}  # KRUK
+    - {ticker: pllotos00025, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # LOTOS
+    - {ticker: pllotos00025, date_from: 2016-03-21, date_to: 2022-07-28, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2016-03-21"}  # LOTOS
+    - {ticker: pllwbgd00016, date_from: 2015-01-02, date_to: 2015-12-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # BOGDANKA
+    - {ticker: plmrctr00015, date_from: 2021-03-22, date_to: 2022-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2021-03-22"}  # MERCATOR
+    - {ticker: plpger000010, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PGE
+    - {ticker: plpgnig00014, date_from: 2015-01-02, date_to: 2022-10-28, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PGNIG
+    - {ticker: plsoftb00016, date_from: 2015-01-02, date_to: 2018-03-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # ASSECOPOL
+    - {ticker: plsoftb00016, date_from: 2020-11-27, date_to: 2024-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2020-11-27"}  # ASSECOPOL
+    - {ticker: pltaurn00011, date_from: 2015-01-02, date_to: 2022-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # TAURONPE
+    - {ticker: pltaurn00011, date_from: 2026-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2026-03-23"}  # TAURONPE
+    - {ticker: pzu, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # PZU
+    - {ticker: spl, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_wig20?_quote_date=2015-01-02"}  # ERSTEPL
+  mwig40:
+    - {ticker: alr, date_from: 2021-03-22, date_to: 2023-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-03-22"}  # ALIOR
+    - {ticker: au0000198939, date_from: 2023-09-18, date_to: 2024-10-29, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-09-18"}  # GREENX
+    - {ticker: brs, date_from: 2015-01-02, date_to: 2020-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # BORYSZEW
+    - {ticker: ccc, date_from: 2015-01-02, date_to: 2015-12-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # CCC
+    - {ticker: ccc, date_from: 2023-03-20, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-03-20"}  # CCC
+    - {ticker: cdr, date_from: 2015-01-02, date_to: 2018-03-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # CDPROJEKT
+    - {ticker: cy1000031710, date_from: 2021-06-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-06-21"}  # ASBIS
+    - {ticker: de000a13stw4, date_from: 2016-03-21, date_to: 2017-06-13, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-03-21"}  # UNIWHEELS
+    - {ticker: dnp, date_from: 2017-06-19, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-06-19"}  # DINOPL
+    - {ticker: es0105375002, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # AMREST
+    - {ticker: gnb, date_from: 2015-01-02, date_to: 2016-09-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GETINOBLE
+    - {ticker: gnb, date_from: 2016-12-19, date_to: 2018-12-28, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-12-19"}  # GETINOBLE
+    - {ticker: gnb, date_from: 2019-06-24, date_to: 2019-09-30, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-06-24"}  # GETINOBLE
+    - {ticker: gtc, date_from: 2015-01-02, date_to: 2021-06-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GTC
+    - {ticker: lu0327357389, date_from: 2015-03-23, date_to: 2023-09-07, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-03-23"}  # KERNEL
+    - {ticker: lu1642887738, date_from: 2017-09-18, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-09-18"}  # PLAY
+    - {ticker: lu2910446546, date_from: 2024-10-30, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-10-30"}  # ZABKA
+    - {ticker: nl0000687309, date_from: 2015-01-02, date_to: 2015-08-04, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GLOBCITYHD
+    - {ticker: nl0015000au7, date_from: 2021-12-20, date_to: 2022-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-12-20"}  # PEPCO
+    - {ticker: opl, date_from: 2026-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2026-03-23"}  # ORANGEPL
+    - {ticker: pl11bts00015, date_from: 2018-06-18, date_to: 2026-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-06-18"}  # 11BIT
+    - {ticker: plab00000019, date_from: 2024-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-03-18"}  # ABPL
+    - {ticker: plalmtl00023, date_from: 2016-09-19, date_to: 2017-06-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-09-19"}  # ALUMETAL
+    - {ticker: plamica00010, date_from: 2015-01-02, date_to: 2022-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # AMICA
+    - {ticker: plapatr00018, date_from: 2015-01-02, date_to: 2017-12-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # APATOR
+    - {ticker: plartpr00012, date_from: 2023-09-01, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-09-01"}  # ARCTIC
+    - {ticker: plassee00014, date_from: 2020-03-18, date_to: 2022-09-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-03-18"}  # ASSECOSEE
+    - {ticker: plassee00014, date_from: 2025-06-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-06-23"}  # ASSECOSEE
+    - {ticker: platprt00018, date_from: 2022-09-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-09-19"}  # AUTOPARTN
+    - {ticker: plbgz0000010, date_from: 2019-09-23, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-09-23"}  # BNPPPL
+    - {ticker: plbgz0000010, date_from: 2022-08-04, date_to: 2022-09-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-08-04"}  # BNPPPL
+    - {ticker: plbgz0000010, date_from: 2023-03-20, date_to: 2023-09-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-03-20"}  # BNPPPL
+    - {ticker: plbgz0000010, date_from: 2024-06-24, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-06-24"}  # BNPPPL
+    - {ticker: plbgz0000010, date_from: 2025-06-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-06-23"}  # BNPPPL
+    - {ticker: plbh00000012, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # HANDLOWY
+    - {ticker: plbig0000016, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # MILLENNIUM
+    - {ticker: plbiotn00029, date_from: 2015-08-05, date_to: 2017-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-08-05"}  # BIOTON
+    - {ticker: plbmdlb00018, date_from: 2020-06-22, date_to: 2022-06-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-06-22"}  # SNTVERSE
+    - {ticker: plbmdlb00018, date_from: 2023-03-20, date_to: 2024-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-03-20"}  # SNTVERSE
+    - {ticker: plbmech00012, date_from: 2022-09-19, date_to: 2024-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-09-19"}  # BUMECH
+    - {ticker: plbnfts00018, date_from: 2016-10-03, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-10-03"}  # BENEFIT
+    - {ticker: plbre0000012, date_from: 2020-10-15, date_to: 2022-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-10-15"}  # MBANK
+    - {ticker: plbsk0000017, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # INGBSK
+    - {ticker: plbudmx00013, date_from: 2015-01-02, date_to: 2024-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # BUDIMEX
+    - {ticker: plcfrpt00013, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # CYFRPLSAT
+    - {ticker: plcfrpt00013, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # CYFRPLSAT
+    - {ticker: plciech00018, date_from: 2015-01-02, date_to: 2023-10-03, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # CIECH
+    - {ticker: plclnph00015, date_from: 2019-10-01, date_to: 2022-09-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-10-01"}  # CLNPHARMA
+    - {ticker: plclnph00015, date_from: 2024-10-21, date_to: 2025-09-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-10-21"}  # CLNPHARMA
+    - {ticker: plcmray00029, date_from: 2020-12-04, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-12-04"}  # CORMAY
+    - {ticker: plcntsl00014, date_from: 2024-02-07, date_to: 2024-06-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-02-07"}  # COGNOR
+    - {ticker: plcomar00012, date_from: 2015-09-21, date_to: 2024-10-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-09-21"}  # COMARCH
+    - {ticker: plcrtch00017, date_from: 2026-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2026-03-23"}  # CREOTECH
+    - {ticker: plctint00018, date_from: 2017-06-14, date_to: 2020-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-06-14"}  # CIGAMES
+    - {ticker: plctint00018, date_from: 2020-11-27, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-11-27"}  # CIGAMES
+    - {ticker: plctint00018, date_from: 2023-06-19, date_to: 2024-12-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-06-19"}  # CIGAMES
+    - {ticker: pldgnst00012, date_from: 2025-09-22, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-09-22"}  # DIAG
+    - {ticker: pldmdvl00012, date_from: 2020-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-03-23"}  # DOMDEV
+    - {ticker: pldwory00019, date_from: 2016-03-21, date_to: 2017-12-29, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-03-21"}  # SYNTHOS
+    - {ticker: plechps00019, date_from: 2015-01-02, date_to: 2017-09-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ECHO
+    - {ticker: plechps00019, date_from: 2019-01-02, date_to: 2021-06-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-01-02"}  # ECHO
+    - {ticker: pleldrd00017, date_from: 2015-01-02, date_to: 2018-04-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # EMPERIA
+    - {ticker: plenea000013, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ENEA
+    - {ticker: plenea000013, date_from: 2017-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-03-20"}  # ENEA
+    - {ticker: plenerg00022, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ENERGA
+    - {ticker: plenerg00022, date_from: 2019-03-18, date_to: 2020-12-03, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-03-18"}  # ENERGA
+    - {ticker: pleurch00011, date_from: 2019-03-18, date_to: 2026-06-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-03-18"}  # EUROCASH
+    - {ticker: plfamur00012, date_from: 2017-12-18, date_to: 2025-06-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-12-18"}  # GRENEVIA
+    - {ticker: plforte00012, date_from: 2015-01-02, date_to: 2020-06-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # FORTE
+    - {ticker: plgpw0000017, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GPW
+    - {ticker: plgrbrn00012, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ALCHEMIA
+    - {ticker: plgrprc00015, date_from: 2022-06-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-06-20"}  # GRUPRACUJ
+    - {ticker: plgspr000014, date_from: 2015-01-02, date_to: 2016-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GETIN
+    - {ticker: plgspr000014, date_from: 2019-03-18, date_to: 2020-09-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-03-18"}  # GETIN
+    - {ticker: plgtbck00297, date_from: 2018-03-19, date_to: 2018-05-08, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-03-19"}  # GETBACK
+    - {ticker: plintcs00010, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # INTERCARS
+    - {ticker: plinteg00011, date_from: 2015-01-02, date_to: 2016-06-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # INTEGERPL
+    - {ticker: pljsw0000015, date_from: 2015-03-23, date_to: 2017-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-03-23"}  # JSW
+    - {ticker: pljsw0000015, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # JSW
+    - {ticker: plkety000011, date_from: 2015-01-02, date_to: 2022-08-03, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # KETY
+    - {ticker: plkrk0000010, date_from: 2015-01-02, date_to: 2022-11-04, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # KRUK
+    - {ticker: pllccrp00017, date_from: 2017-12-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-12-18"}  # DEVELIA
+    - {ticker: pllotos00025, date_from: 2015-03-23, date_to: 2016-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-03-23"}  # LOTOS
+    - {ticker: pllubaw00013, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # LUBAWA
+    - {ticker: pllvtsf00010, date_from: 2018-01-03, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-01-03"}  # TEXT
+    - {ticker: pllwbgd00016, date_from: 2015-12-21, date_to: 2020-09-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-12-21"}  # BOGDANKA
+    - {ticker: pllwbgd00016, date_from: 2022-06-20, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-06-20"}  # BOGDANKA
+    - {ticker: plmbion00016, date_from: 2018-05-09, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-05-09"}  # MABION
+    - {ticker: plmbion00016, date_from: 2021-06-21, date_to: 2023-09-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-06-21"}  # MABION
+    - {ticker: plmdclg00015, date_from: 2015-03-23, date_to: 2018-09-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-03-23"}  # MEDICALG
+    - {ticker: plmobrk00013, date_from: 2022-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-03-21"}  # MOBRUK
+    - {ticker: plmrbud00015, date_from: 2024-09-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-09-23"}  # MIRBUD
+    - {ticker: plmrctr00015, date_from: 2020-06-22, date_to: 2021-03-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-06-22"}  # MERCATOR
+    - {ticker: plmrctr00015, date_from: 2022-03-21, date_to: 2023-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-03-21"}  # MERCATOR
+    - {ticker: plmstsd00019, date_from: 2017-03-20, date_to: 2019-09-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2017-03-20"}  # POLIMEXMS
+    - {ticker: plmstsd00019, date_from: 2023-10-04, date_to: 2024-09-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-10-04"}  # POLIMEXMS
+    - {ticker: plmstsd00019, date_from: 2026-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2026-03-23"}  # POLIMEXMS
+    - {ticker: plmurpl00190, date_from: 2026-06-22, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2026-06-22"}  # MURAPOL
+    - {ticker: plnetia00014, date_from: 2015-01-02, date_to: 2018-12-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # NETIA
+    - {ticker: plnewag00012, date_from: 2015-01-02, date_to: 2015-09-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # NEWAG
+    - {ticker: plnewag00012, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # NEWAG
+    - {ticker: plnfi0900014, date_from: 2015-01-02, date_to: 2015-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # MIDAS
+    - {ticker: ploncth00011, date_from: 2021-03-22, date_to: 2021-12-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-03-22"}  # OAT
+    - {ticker: plorbis00014, date_from: 2015-01-02, date_to: 2020-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ORBIS
+    - {ticker: plpilab00012, date_from: 2020-09-21, date_to: 2023-03-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-09-21"}  # DATAWALK
+    - {ticker: plpkpcr00011, date_from: 2015-01-02, date_to: 2024-07-08, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # PKPCARGO
+    - {ticker: plplayw00015, date_from: 2018-09-24, date_to: 2022-06-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-09-24"}  # PLAYWAY
+    - {ticker: plplsep00013, date_from: 2021-03-22, date_to: 2023-06-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-03-22"}  # PEP
+    - {ticker: plplsep00013, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # PEP
+    - {ticker: plpmwrm00012, date_from: 2018-02-16, date_to: 2018-06-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-02-16"}  # URSUS
+    - {ticker: plpolnd00019, date_from: 2016-06-20, date_to: 2016-12-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-06-20"}  # POLNORD
+    - {ticker: plprmcm00048, date_from: 2015-09-09, date_to: 2016-09-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-09-09"}  # PCM
+    - {ticker: plr220000018, date_from: 2024-07-09, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-07-09"}  # CYBERFLKS
+    - {ticker: plrnbwt00031, date_from: 2024-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-03-18"}  # RAINBOW
+    - {ticker: plrobyg00016, date_from: 2016-03-21, date_to: 2018-02-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-03-21"}  # ROBYG
+    - {ticker: plselvt00013, date_from: 2023-09-18, date_to: 2025-03-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-09-18"}  # RYVU
+    - {ticker: plslvcr00029, date_from: 2021-03-22, date_to: 2025-06-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-03-22"}  # SELVITA
+    - {ticker: plsnktk00019, date_from: 2024-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-03-18"}  # SYNEKTIK
+    - {ticker: plsoftb00016, date_from: 2018-03-19, date_to: 2020-11-26, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-03-19"}  # ASSECOPOL
+    - {ticker: plsoftb00016, date_from: 2024-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-03-18"}  # ASSECOPOL
+    - {ticker: plstlpd00017, date_from: 2015-03-23, date_to: 2016-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-03-23"}  # STALPROD
+    - {ticker: plstlpd00017, date_from: 2016-09-19, date_to: 2020-06-19, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-09-19"}  # STALPROD
+    - {ticker: plstlpd00017, date_from: 2021-03-22, date_to: 2021-09-17, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-03-22"}  # STALPROD
+    - {ticker: plstlsk00016, date_from: 2015-01-02, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # SANOK
+    - {ticker: plstshl00012, date_from: 2022-09-19, date_to: 2023-08-31, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-09-19"}  # STSHOLDING
+    - {ticker: pltaurn00011, date_from: 2022-03-21, date_to: 2026-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-03-21"}  # TAURONPE
+    - {ticker: pltim0000016, date_from: 2023-09-08, date_to: 2024-02-06, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2023-09-08"}  # TIM
+    - {ticker: pltrfrm00018, date_from: 2015-01-02, date_to: 2018-03-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # NEUCA
+    - {ticker: pltrfrm00018, date_from: 2020-03-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-03-23"}  # NEUCA
+    - {ticker: pltrkpl00014, date_from: 2015-01-02, date_to: 2017-12-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # TRAKCJA
+    - {ticker: pltrkpl00014, date_from: 2018-12-27, date_to: 2019-09-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-12-27"}  # TRAKCJA
+    - {ticker: pltsqgm00016, date_from: 2019-09-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-09-23"}  # TSGAMES
+    - {ticker: pltvn0000017, date_from: 2015-01-02, date_to: 2015-09-08, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # TVN
+    - {ticker: plvents00019, date_from: 2015-01-02, date_to: 2016-09-16, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # HAWE
+    - {ticker: plvoxel00014, date_from: 2024-12-23, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2024-12-23"}  # VOXEL
+    - {ticker: plvrcm000016, date_from: 2025-03-24, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2025-03-24"}  # VERCOM
+    - {ticker: plvstla00011, date_from: 2019-03-18, date_to: 2020-10-14, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2019-03-18"}  # VRG
+    - {ticker: plwawel00013, date_from: 2015-01-02, date_to: 2019-06-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # WAWEL
+    - {ticker: plwrtpl00027, date_from: 2018-04-25, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2018-04-25"}  # WIRTUALNA
+    - {ticker: plxtrdm00011, date_from: 2020-09-21, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2020-09-21"}  # XTB
+    - {ticker: plzatrm00012, date_from: 2015-01-02, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # GRUPAAZOTY
+    - {ticker: plzepak00012, date_from: 2015-01-02, date_to: 2016-03-18, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2015-01-02"}  # ZEPAK
+    - {ticker: plzepak00012, date_from: 2022-11-07, date_to: 2024-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2022-11-07"}  # ZEPAK
+    - {ticker: plzpw0000017, date_from: 2016-03-21, date_to: 2019-03-15, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2016-03-21"}  # PFLEIDER
+    - {ticker: us44853h1086, date_from: 2021-09-20, date_to: 2026-03-20, source: "https://bossa.pl/fl_api/API/GPW/v2/Q/R/_cat_mwig40?_quote_date=2021-09-20"}  # HUUUGE

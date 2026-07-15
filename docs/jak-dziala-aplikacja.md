@@ -91,9 +91,8 @@ cenach i przesuwa tzw. stopy kroczące. Stop to poziom alarmowy: „jeśli kurs
 spadnie tutaj — sprzedajemy". Gdy kurs rośnie, stop jedzie w górę za nim
 (zabezpiecza narastający zysk), ale **nigdy nie cofa się w dół**.
 
-**Efekt:** aktualna wartość portfela oraz odświeżone poziomy obronne. W
-symulacji z 14.07: po dniu wzrostów stop dla KGHM podniósł się z 270,13 zł
-na 287,59 zł.
+**Efekt:** aktualna wartość portfela oraz odświeżone poziomy obronne
+(konkretny przykład — w sekcji „Symulacja" poniżej).
 
 ### Krok 5 — obliczenie wskaźników („karta zdrowia" każdej spółki)
 
@@ -181,6 +180,111 @@ Jeśli nie — strategia idzie do kosza, a nie do prawdziwego rachunku.
 
 ---
 
+## Symulacja: dwa prawdziwe wieczory, krok po kroku
+
+Żeby sprawdzić cały cykl w praktyce, 15 lipca 2026 przeprowadziliśmy pełną
+symulację na **kopii prawdziwych danych GPW** (sesje z 13 i 14 lipca).
+Prawdziwe ceny, prawdziwe koszty, wirtualne pieniądze — a „prawdziwy"
+portfel papierowy pozostał nietknięty i wystartuje osobno.
+
+### Wieczór 1 — poniedziałek 13 lipca, 19:30
+
+Program założył portfel: **100 000 zł** (wirtualnych). Rozliczać nie było
+czego (portfel świeży), dane przeszły bramki jakości. Wskaźniki i reguły
+wskazały 6 spółek w potwierdzonym trendzie wzrostowym, a warstwa ryzyka
+wyliczyła dla każdej liczbę sztuk i poziom obronny:
+
+| Sygnał | Ile sztuk | Stop (poziom obronny) |
+|---|---:|---:|
+| KUP PKO BP | 178 | 106,34 zł |
+| KUP Pekao | 82 | 231,37 zł |
+| KUP Orlen | 99 | 133,91 zł |
+| KUP KGHM | 28 | 270,13 zł |
+| KUP Alior | 1 | 134,41 zł |
+| KUP Orange Polska | 815 | 13,37 zł |
+
+Smaczek pokazujący limity ryzyka w praktyce: **dlaczego Alior dostał tylko
+1 akcję?** Bo PKO i Pekao (też banki) zajęły już po ok. 20 tys. zł, niemal
+wyczerpując 40-procentowy limit na jedną branżę — na trzeci bank zostało
+dosłownie kilkadziesiąt złotych miejsca.
+
+Na telefon poszło 7 wiadomości: 6 kart sygnałów + podsumowanie, np.:
+
+```text
+📌 Sygnal GPW (paper)
+Akcja: KUP PKO
+Ilosc: 178
+Data decyzji: 2026-07-13
+Stop: 106.34 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)
+```
+
+**Ważne: tego wieczoru nic jeszcze nie kupiono.** Zlecenia czekają na
+jutrzejsze otwarcie — dziś nikt nie zna jutrzejszych cen.
+
+### Wieczór 2 — wtorek 14 lipca, 19:30
+
+Rano giełda otworzyła sesję i wczorajsze zlecenia „zrealizowały się" po
+cenach otwarcia — z prowizją, spreadem i poślizgiem:
+
+| Kupiono | Ile sztuk | Cena zakupu | Prowizja |
+|---|---:|---:|---:|
+| PKO BP | 178 | 111,22 zł | 75,23 zł |
+| Pekao | 82 | 239,48 zł | 74,62 zł |
+| Orlen | 99 | 144,29 zł | 54,28 zł |
+| KGHM | 28 | 308,92 zł | 32,87 zł |
+| Alior | 1 | 143,19 zł | 3,00 zł |
+| Orange Polska | 815 | 14,76 zł | 45,71 zł |
+
+Ceny zakupu różnią się od poniedziałkowych — to normalne: zlecenie
+realizuje się po **realnej cenie następnego otwarcia**, powiększonej o
+spread i poślizg. Symulacja celowo niczego tu nie upiększa.
+
+Po wycenie na wtorkowym zamknięciu portfel był wart **99 636,23 zł**
+(−0,36%). Skąd ten minus pierwszego dnia? ~286 zł prowizji oraz to, że
+kupuje się po cenie sprzedających, a wycenia po kursie zamknięcia. To
+uczciwy koszt wejścia, który strategia musi dopiero odrobić.
+
+Do tego: stopy kroczące od razu podjechały w górę za rosnącymi kursami
+(KGHM: 270,13 → 287,59 zł; Orlen: 133,91 → 136,86 zł), a reguły znalazły
+jeden nowy sygnał — **KUP PZU, 279 szt., stop 65,58 zł** — który czekał już
+na środowe otwarcie. Na telefon poszło 8 wiadomości, m.in.:
+
+```text
+✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO PKO: 178 szt. po 111.22 PLN
+Data: 2026-07-14
+
+📊 Portfel GPW (paper)
+Sesja: 2026-07-14
+Kapital: 99,636.23 PLN (gotowka: 25,173.25 PLN)
+Otwarte pozycje: 6
+```
+
+### Na koniec: próba awarii (celowo zepsuliśmy dane)
+
+Przestawiliśmy systemowi zegar o tydzień do przodu, nie dając mu świeżych
+notowań. Reakcja: **odmowa podjęcia jakiejkolwiek decyzji** i alarm na
+telefon — dokładnie tak, jak powinno być:
+
+```text
+⚠️ Sygnaly GPW (paper): WSTRZYMANE
+Powod: latest session 2026-07-14 is 8 days old (max_staleness_days=4) — ingest broken?
+Szczegoly: make signals
+```
+
+Portfel pozostał nietknięty.
+
+### Bilans symulacji
+
+W dwa wieczory system przeszedł pełny cykl życia: **sygnał → zakup z
+uczciwymi kosztami → ochrona rosnącego zysku (stopy) → nowy sygnał →
+odporność na awarię danych**. Stan końcowy: 6 pozycji, 25 173,25 zł
+gotówki, jedno zlecenie oczekujące (PZU) i komplet wpisów w dzienniku
+decyzji.
+
+---
+
 ## Skąd wiadomo, że reguły nie są wyssane z palca?
 
 Zanim strategia w ogóle trafiła do codziennego użytku, przeszła symulację na
@@ -235,7 +339,7 @@ samooszukiwaniem:
 
 ## Chcę to zobaczyć na własne oczy
 
-- **Symulacja pełnego dnia** (z prawdziwymi danymi z 13–14.07.2026):
+- **Pełny raport techniczny z powyższej symulacji** (po angielsku):
   [docs/simulations/day-01-2026-07-15.md](simulations/day-01-2026-07-15.md)
 - **Makieta powiadomień Telegram** (jak to wygląda na telefonie):
   [docs/simulations/day-01-2026-07-15-telegram-mockup.html](simulations/day-01-2026-07-15-telegram-mockup.html)

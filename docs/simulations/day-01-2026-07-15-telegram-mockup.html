@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Makieta alertów Telegram — GPW paper, dzień 1 (symulacja)</title>
+<style>
+  :root {
+    --bg: #0e1621;
+    --panel: #17212b;
+    --panel-2: #1e2c3a;
+    --bubble: #182533;
+    --bubble-border: #22303e;
+    --text: #e7edf2;
+    --muted: #7f91a4;
+    --accent: #5eb5f7;
+    --green: #6ecb81;
+    --amber: #e8b357;
+    --divider: #24303c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: .01em; }
+  .sub { color: var(--muted); margin-top: 4px; font-size: .92rem; }
+  .badge {
+    display: inline-block; margin-top: 10px; padding: 3px 10px;
+    border: 1px solid var(--amber); color: var(--amber);
+    border-radius: 999px; font-size: .78rem; letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .cols { display: grid; grid-template-columns: minmax(320px, 1fr) 440px; gap: 28px; margin-top: 26px; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+
+  /* ---------- timeline ---------- */
+  .timeline { background: var(--panel); border: 1px solid var(--divider); border-radius: 14px; padding: 20px 22px; align-self: start; }
+  .timeline h2 { font-size: 1.02rem; margin-bottom: 14px; color: var(--accent); }
+  .tl-item { display: grid; grid-template-columns: 66px 1fr; gap: 12px; padding: 9px 0; border-top: 1px solid var(--divider); }
+  .tl-item:first-of-type { border-top: 0; }
+  .tl-time { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; font-size: .9rem; padding-top: 1px; }
+  .tl-body b { font-weight: 600; }
+  .tl-body .d { color: var(--muted); font-size: .88rem; margin-top: 2px; }
+  .note {
+    margin-top: 16px; padding: 12px 14px; border-left: 3px solid var(--green);
+    background: var(--panel-2); border-radius: 8px; font-size: .88rem; color: #c7d3de;
+  }
+  .note b { color: var(--green); }
+
+  /* ---------- phone / chat ---------- */
+  .phone { background: var(--panel); border: 1px solid var(--divider); border-radius: 18px; overflow: hidden; }
+  .chat-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; background: var(--panel-2); border-bottom: 1px solid var(--divider);
+  }
+  .avatar {
+    width: 40px; height: 40px; border-radius: 50%; flex: none;
+    background: linear-gradient(135deg, #2b5876, #4e4376);
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
+  }
+  .chat-title { font-weight: 650; font-size: .98rem; }
+  .chat-status { color: var(--muted); font-size: .8rem; }
+  .chat { padding: 14px 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+  .day-chip {
+    align-self: center; margin: 10px 0 4px; padding: 3px 12px;
+    background: rgba(0,0,0,.35); color: #aebfce; border-radius: 999px; font-size: .78rem;
+  }
+  .day-chip.warn { color: var(--amber); border: 1px dashed rgba(232,179,87,.5); background: rgba(232,179,87,.07); }
+  .msg {
+    max-width: 88%; align-self: flex-start;
+    background: var(--bubble); border: 1px solid var(--bubble-border);
+    border-radius: 4px 14px 14px 14px; padding: 8px 12px 6px;
+    white-space: pre-line; font-size: .9rem;
+  }
+  .msg .t { display: block; text-align: right; color: var(--muted); font-size: .72rem; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .sys { align-self: center; color: var(--muted); font-size: .78rem; font-style: italic; text-align: center; max-width: 90%; }
+
+  /* ---------- extras ---------- */
+  details { margin-top: 18px; background: var(--panel); border: 1px solid var(--divider); border-radius: 12px; padding: 14px 18px; }
+  summary { cursor: pointer; color: var(--accent); font-size: .92rem; }
+  details .msg { margin-top: 10px; }
+  .foot { margin-top: 26px; color: var(--muted); font-size: .84rem; line-height: 1.6; }
+  .foot code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-size: .82rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📈 GPW paper trading — tak wygląda dzień systemu</h1>
+  <div class="sub">Symulacja dnia 1 (sandbox, kopia prawdziwych danych GPW, strategia trend_momentum, zero LLM). Wiadomości poniżej wygenerował rzeczywisty kod alertów — dokładnie te teksty trafiłyby na Telegram.</div>
+  <span class="badge">Makieta · symulacja · paper only</span>
+
+  <div class="cols">
+    <div>
+      <div class="timeline">
+        <h2>Harmonogram dnia</h2>
+        <div class="tl-item"><div class="tl-time">w ciągu dnia</div><div class="tl-body"><b>Kolektor komunikatów</b> (<code>make collect-loop</code>)<div class="d">ESPI/EBI + newsy zbierane cyklicznie do bazy, zero LLM. System nie podejmuje żadnych decyzji intraday — to system EOD.</div></div></div>
+        <div class="tl-item"><div class="tl-time">09:00–17:00</div><div class="tl-body"><b>Sesja GPW</b><div class="d">Rynek handluje; system czeka. Wczorajsze sygnały „realizują się" na dzisiejszym otwarciu — policzyć można to dopiero z danych po sesji.</div></div></div>
+        <div class="tl-item"><div class="tl-time">~19:00</div><div class="tl-body"><b>GPW publikuje plik sesyjny</b><div class="d">Dane EOD (kursy + wolumen) stają się dostępne.</div></div></div>
+        <div class="tl-item"><div class="tl-time">19:30</div><div class="tl-body"><b>Cron: <code>make signals</code></b><div class="d">ingest → bramki jakości (świeżość, pokrycie sesji, zgodność konfiguracji) → rozliczenie wczorajszych zleceń po dzisiejszym otwarciu → akcje korporacyjne → wycena portfela + stopy kroczące → decyzje na dzisiejszym zamknięciu → zapis do bazy.</div></div></div>
+        <div class="tl-item"><div class="tl-time">19:31</div><div class="tl-body"><b>Karty na Telegram</b><div class="d">Wysyłka DOPIERO po zapisie stanu (awaria Telegrama nie może zepsuć księgi). Bez tokena karty czekają w kolejce.</div></div></div>
+      </div>
+      <div class="note"><b>Kontrakt czasowy:</b> sygnał z zamknięcia sesji T staje się zleceniem PENDING i realizuje się po otwarciu sesji T+1 — kupno po ask + poślizg + prowizja, nigdy ponad realny wolumen. Dokładnie tak samo liczy backtest (pilnuje tego test parytetu).</div>
+      <div class="note" style="border-color: var(--amber);"><b style="color: var(--amber);">Zero LLM:</b> cała ścieżka decyzje → ryzyko → wielkość pozycji → realizacja to deterministyczny kod. Warstwa językowa (Fazy 2+) będzie tylko WEJŚCIEM do warstwy ryzyka.</div>
+    </div>
+
+    <div class="phone">
+      <div class="chat-header">
+        <div class="avatar">📈</div>
+        <div>
+          <div class="chat-title">GPW Sygnały (paper)</div>
+          <div class="chat-status">bot · makieta — połączenie z Telegramem jeszcze nie skonfigurowane</div>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="day-chip">poniedziałek, 13 lipca 2026</div>
+        <div class="sys">pierwszy wieczór: bootstrap portfela papierowego — kapitał 100 000 PLN</div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP PKO
+Ilosc: 178
+Data decyzji: 2026-07-13
+Stop: 106.34 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP PEO
+Ilosc: 82
+Data decyzji: 2026-07-13
+Stop: 231.37 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP PKN
+Ilosc: 99
+Data decyzji: 2026-07-13
+Stop: 133.91 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP KGH
+Ilosc: 28
+Data decyzji: 2026-07-13
+Stop: 270.13 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP ALR
+Ilosc: 1
+Data decyzji: 2026-07-13
+Stop: 134.41 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP OPL
+Ilosc: 815
+Data decyzji: 2026-07-13
+Stop: 13.37 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:31</span></div>
+        <div class="msg">📊 Portfel GPW (paper)
+Sesja: 2026-07-13
+Kapital: 100,000.00 PLN (gotowka: 100,000.00 PLN)
+Otwarte pozycje: 0<span class="t">19:32</span></div>
+
+        <div class="day-chip">wtorek, 14 lipca 2026</div>
+        <div class="sys">wczorajsze zlecenia zrealizowane na dzisiejszym otwarciu (ask + poślizg + prowizja)</div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO PKO: 178 szt. po 111.22 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO PEO: 82 szt. po 239.48 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO PKN: 99 szt. po 144.29 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO KGH: 28 szt. po 308.92 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO ALR: 1 szt. po 143.19 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+KUPIONO OPL: 815 szt. po 14.76 PLN
+Data: 2026-07-14<span class="t">19:31</span></div>
+        <div class="msg">📌 Sygnal GPW (paper)
+Akcja: KUP PZU
+Ilosc: 279
+Data decyzji: 2026-07-14
+Stop: 65.58 PLN
+Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)<span class="t">19:32</span></div>
+        <div class="msg">📊 Portfel GPW (paper)
+Sesja: 2026-07-14
+Kapital: 99,636.23 PLN (gotowka: 25,173.25 PLN)
+Otwarte pozycje: 6<span class="t">19:32</span></div>
+
+        <div class="day-chip warn">scenariusz awaryjny (demo): ingest przestał działać</div>
+        <div class="sys">po kilku dniach bez świeżych danych system ODMAWIA decyzji zamiast zgadywać — i pisze o tym od razu</div>
+        <div class="msg">⚠️ Sygnaly GPW (paper): WSTRZYMANE
+Powod: latest session 2026-07-14 is 8 days old (max_staleness_days=4) — ingest broken?
+Szczegoly: make signals<span class="t">19:30</span></div>
+      </div>
+    </div>
+  </div>
+
+  <details>
+    <summary>Pozostałe formaty kart (przykłady formatu — nie wystąpiły w tej symulacji)</summary>
+    <div class="msg">✅ Zlecenie GPW (paper): ZREALIZOWANO
+SPRZEDANO CCC: 45 szt. po 61.32 PLN
+Data: 2026-07-14
+Uwaga: zlecenie czesciowe (45/120 szt., limit wolumenu)<span class="t">przykład</span></div>
+    <div class="msg">⚠️ Zlecenie GPW (paper): NIE ZREALIZOWANO
+Zlecenie: KUP GTC, 900 szt.
+Powod: brak notowan na sesji realizacji
+Data: 2026-07-14<span class="t">przykład</span></div>
+  </details>
+
+  <div class="foot">
+    Makieta: treści wiadomości wygenerowane przez <code>app.alerts.telegram</code> na kopii bazy (sandbox) — realny rejestr paper tradingu pozostał nietknięty.
+    Aby karty przychodziły naprawdę, ustaw w <code>.env</code>: <code>TELEGRAM_BOT_TOKEN</code> i <code>TELEGRAM_CHAT_ID</code>; bez nich system działa w trybie dry-run (karty trafiają do konsoli i czekają w kolejce na dostarczenie).
+    Symulacja: wieczory 13–14.07.2026, strategia <code>trend_momentum</code> v1, prowizja + spread + poślizg wliczone. Paper trading — żadnych prawdziwych zleceń.
+  </div>
+</div>
+</body>
+</html>

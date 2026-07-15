@@ -6,7 +6,7 @@ equivalence, namespace isolation, and alert delivery bookkeeping.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -203,6 +203,19 @@ def test_universe_change_requires_acknowledgement(conn):
     grown = _universe(("aaa", "bbb", "ccc"))
     code, rep = _run(conn, calendar=calendar, universe=grown)
     assert code == 2 and "config changed" in rep.reason
+
+
+def test_config_hash_accepts_yaml_date_objects():
+    """PyYAML parses unquoted ISO dates (universe listed_from/listed_to) into
+    datetime.date; the pin must accept them AND match the string-dated hash,
+    so it never depends on which type the YAML parser produced."""
+    strat, bt = _strategy(), _bt_cfg()
+    dated = _universe()
+    dated["instruments"][0]["listed_from"] = date(2004, 11, 10)
+    stringed = _universe()
+    stringed["instruments"][0]["listed_from"] = "2004-11-10"
+    assert (loop.config_hash(strat, bt, dated)
+            == loop.config_hash(strat, bt, stringed))
 
 
 def test_unconfigured_telegram_keeps_cards_queued(conn):

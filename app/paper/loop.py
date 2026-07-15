@@ -98,8 +98,11 @@ def config_hash(strategy_cfg: dict, bt_cfg: dict, universe: dict) -> str:
         "universe": universe.get("instruments", []),
         "universe_gate": (bt_cfg.get("universe") or {}).get("index"),
     }
+    # default=str: PyYAML parses unquoted ISO dates (universe listed_from/
+    # listed_to) into datetime.date; hash them as their ISO text, matching
+    # validation.config_hash. Identical output for date-free payloads.
     return hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
 
 
@@ -230,7 +233,7 @@ def run_signals(
 
     strategy_id = declog.register_strategy(
         conn, strategy_cfg["name"], int(strategy_cfg["version"]),
-        json.dumps(strategy_cfg, sort_keys=True),
+        json.dumps(strategy_cfg, sort_keys=True, default=str),
     )
 
     if state_row is None:

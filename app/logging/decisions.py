@@ -53,7 +53,10 @@ def log_decision(
             decision_date,
             action,
             json.dumps(features, sort_keys=True),
-            json.dumps(params, sort_keys=True) if params is not None else None,
+            # params is a YAML strategy config: unquoted ISO dates arrive as
+            # datetime.date (see paper.loop.config_hash)
+            json.dumps(params, sort_keys=True, default=str)
+            if params is not None else None,
             _now(),
         ),
     )

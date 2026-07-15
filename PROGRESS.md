@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 272 passing.
+ZERO LLM in the money path. **Tests:** 308 passing.
 
 ---
 
@@ -89,6 +89,20 @@ ZERO LLM in the money path. **Tests:** 272 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-15 — First live-data shakedown of `make signals` + day-1 simulation
+- **Fix (`461e3a6`):** unquoted ISO dates in `config/universe.yaml`
+  (`listed_from`) arrive from PyYAML as `datetime.date` and crashed
+  `paper.loop.config_hash` on the first-ever real `signals` run. `default=str`
+  at the three config-serialization sites (the convention
+  `validation.config_hash` already used); regression test pins that date
+  objects hash identically to their ISO strings. Suite **308 passing**.
+- **Day-1 walkthrough on real data** (sandbox copy of `data/gpw.db`; real
+  paper track record still unstarted): two evenings replayed through the real
+  loop — 6 signals decided 2026-07-13, all filled at the 2026-07-14 open with
+  the full cost model (equity 99,636.23 after day one), trailing stops moved,
+  1 new signal queued; staleness-refusal ops demo; exact Telegram cards
+  captured verbatim. Report: `docs/simulations/day-01-2026-07-15.md`.
 
 ### 2026-07-06 — Daily paper-trading loop (`make signals`)
 Completes the Phase-1 blueprint gate ("paper trading 1 strategy vs WIG →

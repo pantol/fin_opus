@@ -90,6 +90,14 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-16 — Day-2 simulation (session 2026-07-15)
+- Sandbox book advanced one session through the real loop: PZU filled at the
+  Wednesday open (279 @ 69.24, fee 73.41), equity 99,124.09 (−0.51% vs
+  WIG20TR −0.41%), 7 positions, OPL stop trailed up, new SPL signal sized to
+  qty 1 by the banking-sector cap. Cards captured verbatim. Report:
+  `docs/simulations/day-02-2026-07-16.md` (+ Telegram mockup HTML). Real
+  paper track record still unstarted.
+
 ### 2026-07-15 — First live-data shakedown of `make signals` + day-1 simulation
 - **Fix (`461e3a6`):** unquoted ISO dates in `config/universe.yaml`
   (`listed_from`) arrive from PyYAML as `datetime.date` and crashed

@@ -90,6 +90,15 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-17 — Day-3 simulation (session 2026-07-16)
+- Sandbox book advanced one session: SPL filled at the Thursday open (1 @
+  676.35, fee 3.00 = commission minimum, 0.44% effective — micro-orders are
+  proportionally the priciest), equity 98,152.64 (−0.98% vs WIG20TR −0.20%;
+  −1.85% since inception vs −0.61%), 8 positions, PKN stop trailed up, and
+  the first zero-signal evening (queue empty — steady state). Report:
+  `docs/simulations/day-03-2026-07-17.md` (+ mockup HTML). Real track record
+  still unstarted.
+
 ### 2026-07-16 — Day-2 simulation (session 2026-07-15)
 - Sandbox book advanced one session through the real loop: PZU filled at the
   Wednesday open (279 @ 69.24, fee 73.41), equity 99,124.09 (−0.51% vs

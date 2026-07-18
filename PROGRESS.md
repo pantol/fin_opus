@@ -90,6 +90,15 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-18 — Fresh-start scenario (new book on session 2026-07-17)
+- Separate sandbox: a brand-new 100k book bootstrapped on the Friday close →
+  5 full-size BUY signals (PKO 161, PEO 69, PKN 122, ALR 52, OPL 957; ~72%
+  of capital), filling at the Monday 07-20 open. KGH/PZU excluded by
+  negative 6M momentum; SPL passes entry rules but sized to ZERO by the
+  exhausted 40% banking cap. Documents the trailing-stop churn paradox: the
+  day-1…4 book sells PEO/ALR at the same open this book buys them. Report:
+  `docs/simulations/fresh-start-2026-07-18.md` (+ mockup HTML).
+
 ### 2026-07-18 — Day-4 simulation (session 2026-07-17)
 - Sandbox book advanced one session: nothing to settle (empty queue), equity
   97,573.74 (−0.59% vs WIG20TR −0.77% — first day of relative

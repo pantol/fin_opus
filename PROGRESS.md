@@ -90,6 +90,15 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-18 — Day-4 simulation (session 2026-07-17)
+- Sandbox book advanced one session: nothing to settle (empty queue), equity
+  97,573.74 (−0.59% vs WIG20TR −0.77% — first day of relative
+  outperformance; −2.43% vs −1.37% since inception), PKN/OPL stops trailed
+  up, and the FIRST exit signals: PEO (close 229.00 < stop 231.37) and ALR
+  (133.30 < 134.41) queued as SELLs for the Monday 07-20 open (weekend
+  between decision and fill). Report: `docs/simulations/day-04-2026-07-18.md`
+  (+ mockup HTML). Real track record still unstarted.
+
 ### 2026-07-17 — Day-3 simulation (session 2026-07-16)
 - Sandbox book advanced one session: SPL filled at the Thursday open (1 @
   676.35, fee 3.00 = commission minimum, 0.44% effective — micro-orders are

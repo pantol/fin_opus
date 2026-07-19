@@ -17,13 +17,15 @@ extraction:
   max_tokens: 800
 
 # Pricier synthesis / judge (research + quant + fundamentals -> verdict JSON).
-# Kimi K3 is a REASONING model: its thinking tokens bill as completion tokens,
+# GLM 5.2 is a REASONING model: its thinking tokens bill as completion tokens,
 # so max_tokens needs headroom well beyond the verdict JSON itself — too low
 # and the answer truncates mid-thought and schema validation rejects it.
+# Pinned to first-party z-ai: fp8 serve (cheaper hosts are fp4-quantized or on
+# promo pricing that would drift from the ledger prices below).
 synthesis:
-  model: moonshotai/kimi-k3
+  model: z-ai/glm-5.2
   provider:
-    order: ["Moonshot AI"]  # sole OpenRouter host (first-party); supports JSON mode
+    order: [z-ai]
     allow_fallbacks: false
   temperature: 0.1
   max_tokens: 3000
@@ -40,7 +42,7 @@ request_timeout_seconds: 60
 # tracking would undercount and the cap would never trigger.
 prices:
   openai/gpt-4o-mini: {input_per_1m: 0.15, output_per_1m: 0.60}
-  moonshotai/kimi-k3: {input_per_1m: 3.00, output_per_1m: 15.00}
+  z-ai/glm-5.2: {input_per_1m: 1.40, output_per_1m: 4.40}
 
 # Monthly HARD cap on LLM spend (USD, calendar month, UTC). When reached, live
 # LLM calls stop (cache hits still work — they are free), the pipeline records

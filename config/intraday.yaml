@@ -1,0 +1,24 @@
+# Delayed intraday recording + monitoring (informational tier; ZERO decisions).
+# The free feed is ~15 min delayed — good enough to RECORD a dataset for
+# future intraday backtests and to warn early; NOT an execution feed.
+source: yahoo_delayed
+interval_minutes: 5
+fetch_delay_seconds: 0.4      # politeness gap between per-ticker requests
+
+# Yahoo's WSE coverage is incomplete: these universe names have no Warsaw
+# listing on the feed (only foreign venues — Stuttgart/OTC quotes are NOT
+# GPW prices and must not enter the dataset). Known gaps until a real GPW
+# feed (bossaAPI) fills them; verified 2026-07-20.
+skip_tickers: [ccc, spl]
+
+# GPW continuous session 09:00-17:00 + closing auction ends ~17:05. The
+# recording window extends past the close because the ~15-min feed delay
+# delivers the final bars after 17:00.
+session:
+  days: [0, 1, 2, 3, 4]       # Mon..Fri (Python weekday numbers)
+  start: "09:05"
+  end: "17:30"
+loop_interval_minutes: 5
+
+monitor:
+  near_stop_pct: 0.02         # warn when price is within 2% above the stop

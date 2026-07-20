@@ -85,5 +85,9 @@ def load_llm_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "llm.yaml")
 
 
+def load_intraday_config() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "intraday.yaml")
+
+
 def load_backup_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "backup.yaml")

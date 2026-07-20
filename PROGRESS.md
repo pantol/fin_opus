@@ -90,6 +90,24 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-20 — Intraday recorder + stop-monitor tier (day-trading groundwork)
+- Direction accepted: day trading needs intraday data. Free real-time GPW
+  APIs no longer exist (XTB xAPI shut down 03/2025; Stooq light endpoint
+  gone — both verified live); bossaAPI (DM BOŚ account) is the future
+  real-time path. v1 RECORDS the free ~15-min-delayed Yahoo chart feed to
+  build the dataset any intraday backtest will need.
+- New: `prices_intraday` (append-only, first write wins, `as_of_ts` = first
+  observation — point-in-time extended to intraday) + `intraday_alerts`
+  dedupe table; `app/ingestion/intraday.py` recorder (curl_cffi chrome
+  impersonation — Yahoo 429s bare TLS clients like the GPW WAF; CCC + SPL
+  are documented feed gaps, foreign-venue quotes rejected on principle);
+  `app/alerts/monitor.py` — INFORMATIONAL stop monitor (NEAR_STOP /
+  STOP_BREACH Polish cards, at most one per position+state+session, ZERO
+  writes to money tables — decisions stay evening-only); `make intraday` /
+  `make intraday-loop`; `config/intraday.yaml`.
+- Verified live mid-session: 160 bars / 12 tickers stored; monitor flagged
+  PKO +0.7%, PEO +0.1%, ALR +1.2% above their stops. Suite **320 passing**.
+
 ### 2026-07-20 — Fix: sessionless ingest window no longer aborts `make signals`
 - A weekend/holiday-only incremental window produced phantom failures and
   exit 2: the chart-json endpoint answers sessionless ranges with a

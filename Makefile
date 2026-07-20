@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop refdata check-data backup restore-test status signals label eval-llm clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop intraday intraday-loop refdata check-data backup restore-test status signals label eval-llm clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -82,6 +82,15 @@ collect:
 # Same collector, but run forever on the configured schedule (VPS daemon).
 collect-loop:
 	$(PYTHON) -m app.ingestion.collect_news --loop
+
+# Delayed intraday recorder + stop monitor (informational tier, ZERO
+# decisions; ~15-min delayed free feed). One-shot cycle.
+intraday:
+	$(PYTHON) -m app.ingestion.intraday
+
+# Same recorder, but run forever every N minutes inside the session window.
+intraday-loop:
+	$(PYTHON) -m app.ingestion.intraday --loop
 
 # Online DB snapshot (VACUUM INTO — never a live-file copy), push to R2 when
 # R2_* env credentials exist, apply retention (config/backup.yaml).

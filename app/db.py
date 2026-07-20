@@ -311,6 +311,42 @@ CREATE INDEX IF NOT EXISTS idx_paper_orders_user ON paper_orders(user_id, status
 -- this is safe on pre-existing databases.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_open_unique
     ON positions(user_id, instrument_id) WHERE status = 'OPEN';
+
+-- Delayed intraday bars (recording tier — day-trading groundwork).
+-- Append-only: a stored bar is never updated (first write wins); the parser
+-- drops the feed's final, possibly still-forming bar. as_of_ts records when
+-- WE first observed the bar (the free feed is ~15 min delayed), extending
+-- the point-in-time rule to intraday timestamps. Never read by the EOD
+-- decision path.
+CREATE TABLE IF NOT EXISTS prices_intraday (
+    id            INTEGER PRIMARY KEY,
+    instrument_id INTEGER NOT NULL REFERENCES instruments(id),
+    bar_start     TEXT NOT NULL,          -- ISO datetime with offset (Warsaw)
+    interval_min  INTEGER NOT NULL,
+    open          REAL NOT NULL,
+    high          REAL NOT NULL,
+    low           REAL NOT NULL,
+    close         REAL NOT NULL,
+    volume        REAL NOT NULL DEFAULT 0,
+    as_of_ts      TEXT NOT NULL,          -- first-observation time (ISO, Warsaw)
+    source        TEXT NOT NULL,          -- e.g. 'yahoo_delayed'
+    UNIQUE (instrument_id, bar_start, interval_min, source)
+);
+CREATE INDEX IF NOT EXISTS idx_intraday_inst_ts
+    ON prices_intraday(instrument_id, bar_start);
+
+-- Intraday monitor dedupe: at most one warning per (position, session, state)
+-- per day. The monitor is an INFORMATIONAL tier only — it never writes to
+-- decisions / positions / paper_orders / trades.
+CREATE TABLE IF NOT EXISTS intraday_alerts (
+    id           INTEGER PRIMARY KEY,
+    position_id  INTEGER NOT NULL REFERENCES positions(id),
+    session_date TEXT NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('NEAR_STOP', 'STOP_BREACH')),
+    price        REAL NOT NULL,
+    created_at   TEXT NOT NULL,
+    UNIQUE (position_id, session_date, state)
+);
 """
 
 

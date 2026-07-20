@@ -117,6 +117,25 @@ def format_order_outcome_pl(order: dict) -> str:
     return "\n".join(lines)
 
 
+def format_intraday_warning_pl(w: dict) -> str:
+    """Early-warning card from the intraday monitor (informational only)."""
+    pct = (w["price"] / w["stop_price"] - 1.0) * 100.0
+    when = str(w.get("bar_start", ""))[11:16]
+    if w["state"] == "STOP_BREACH":
+        head = "🔻 Monitor GPW (paper): kurs PONIZEJ stopa"
+        detail = f"{w['ticker'].upper()}: {w['price']:.2f} PLN ({pct:+.1f}% od stopa {w['stop_price']:.2f})"
+    else:
+        head = "🟡 Monitor GPW (paper): kurs blisko stopa"
+        detail = f"{w['ticker'].upper()}: {w['price']:.2f} PLN ({pct:+.1f}% nad stopem {w['stop_price']:.2f})"
+    return "\n".join([
+        head,
+        detail,
+        f"Pozycja: {w['qty']} szt., notowanie z ok. {when} (dane opoznione ~15 min)",
+        "Informacja pogladowa — decyzja zapada WYLACZNIE na zamknieciu; "
+        "ewentualna sprzedaz zakolejkuje wieczorny przebieg.",
+    ])
+
+
 def format_paper_summary_pl(*, date: str, equity: float, cash: float,
                             n_open: int) -> str:
     return "\n".join([

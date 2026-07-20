@@ -90,6 +90,18 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-20 (evening) — Day-5 simulation: settlement day (session 2026-07-20)
+- First evening run executed in the production cron's real time slot.
+  Friday's SELLs filled at the Monday open: PEO 82 @ 229.44, ALR 1 @ 133.03
+  — first realized paper losses (≈ −985 PLN ≈ 1% of the book, matching the
+  risk_per_trade budget). Textbook whipsaw: both banks closed HIGHER and
+  re-qualified on the close → re-entry signals BUY PEO 67 / BUY ALR 27
+  (freed sector headroom re-sized ALR up from 1 share). Equity 97,731.10
+  (+0.16% vs WIG20TR +0.47%; −2.27% vs −0.91% since inception); PKO
+  survived its stop by 0.40 PLN. Intraday dataset day 1 complete: 998
+  five-minute bars (09:00–16:45, 12 tickers) after one post-close backfill
+  cycle. Report: `docs/simulations/day-05-2026-07-20.md` (+ mockup HTML).
+
 ### 2026-07-20 — Intraday recorder + stop-monitor tier (day-trading groundwork)
 - Direction accepted: day trading needs intraday data. Free real-time GPW
   APIs no longer exist (XTB xAPI shut down 03/2025; Stooq light endpoint

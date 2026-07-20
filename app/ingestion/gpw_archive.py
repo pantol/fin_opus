@@ -219,7 +219,8 @@ def ingest_range(
     they traded.
 
     Indices (benchmark + `indices` entries) come from GPW Benchmark's
-    chart-json in one request each, covering [start, end].
+    chart-json in one request each, covering [start, end] — skipped when the
+    window holds no trading sessions.
 
     Resilient like the Stooq path: one failed session day or index does not
     abort the rest; successes commit per session; re-runs are idempotent.
@@ -227,34 +228,6 @@ def ingest_range(
     """
     provenance.assert_no_mixing(conn, provenance.GPW_SOURCE)
     report = IngestReport()
-
-    # -- indices / benchmark (one request each, full range) --
-    index_entries = list(universe.get("indices", []))
-    if universe.get("benchmark"):
-        index_entries.append(universe["benchmark"])
-    for entry in index_entries:
-        ticker = entry["ticker"]
-        # GPW files use short index names ("WIG20TR"), configs may carry long
-        # ones ("WIG20 Total Return") — try the name, fall back to the ticker.
-        candidates = [n for n in (entry.get("name"), ticker) if n]
-        bars, last_exc = None, None
-        for name in candidates:
-            try:
-                bars = fetch_index_bars(name, start, end)
-                break
-            except Exception as exc:  # noqa: BLE001 - try next candidate
-                last_exc = exc
-        if bars is None:
-            report.failures[ticker] = str(last_exc)
-            continue
-        bars = [b for b in bars if start.isoformat() <= b.date <= end.isoformat()]
-        if not bars:
-            report.failures[ticker] = "no index history in range"
-            continue
-        inst_id = upsert_instrument(conn, entry, is_index=True)
-        report.counts[ticker] = store_bars(conn, inst_id, bars, adjusted=False,
-                                           source=provenance.GPW_SOURCE)
-        conn.commit()
 
     # -- equities: one session file per trading day --
     by_isin: dict[str, dict] = {}
@@ -301,22 +274,62 @@ def ingest_range(
                 time.sleep(delay_seconds)
         day += timedelta(days=1)
 
+    # -- indices / benchmark (one request each, full range) --
+    # Runs AFTER the equities pass so `sessions` is known: indices trade the
+    # same GPW calendar, so a window with zero equities session files (a
+    # weekend/holiday incremental run) has no index data either — and the
+    # chart-json endpoint answers such ranges with a request-echo payload,
+    # which would otherwise surface as a phantom failure and a non-zero exit
+    # that aborts the `make signals` chain on weekday holidays.
+    if sessions:
+        index_entries = list(universe.get("indices", []))
+        if universe.get("benchmark"):
+            index_entries.append(universe["benchmark"])
+        for entry in index_entries:
+            ticker = entry["ticker"]
+            # GPW files use short index names ("WIG20TR"), configs may carry
+            # long ones ("WIG20 Total Return") — try the name, fall back to
+            # the ticker.
+            candidates = [n for n in (entry.get("name"), ticker) if n]
+            bars, last_exc = None, None
+            for name in candidates:
+                try:
+                    bars = fetch_index_bars(name, start, end)
+                    break
+                except Exception as exc:  # noqa: BLE001 - try next candidate
+                    last_exc = exc
+            if bars is None:
+                report.failures[ticker] = str(last_exc)
+                continue
+            bars = [b for b in bars
+                    if start.isoformat() <= b.date <= end.isoformat()]
+            if not bars:
+                report.failures[ticker] = "no index history in range"
+                continue
+            inst_id = upsert_instrument(conn, entry, is_index=True)
+            report.counts[ticker] = store_bars(conn, inst_id, bars,
+                                               adjusted=False,
+                                               source=provenance.GPW_SOURCE)
+            conn.commit()
+
     # A universe instrument whose ISIN never appeared in any session file gets
     # a failure entry (silence would read as "covered" when it wasn't) —
     # unless its absence is EXPECTED because the whole window lies outside its
     # [listed_from, delisted_on] lifetime (e.g. incremental runs after a
-    # delisting must not fail forever).
-    for isin, entry in by_isin.items():
-        if isin in inst_ids or entry["ticker"] in report.failures:
-            continue
-        delisted = entry.get("delisted_on")
-        listed = entry.get("listed_from")
-        if delisted and str(delisted) < start.isoformat():
-            continue
-        if listed and str(listed) > end.isoformat():
-            continue
-        report.failures[entry["ticker"]] = (
-            f"ISIN {isin} not found in any session file "
-            f"{start.isoformat()}..{end.isoformat()} ({sessions} sessions)")
+    # delisting must not fail forever). A sessionless window proves nothing
+    # about coverage, so it reports no absences at all.
+    if sessions:
+        for isin, entry in by_isin.items():
+            if isin in inst_ids or entry["ticker"] in report.failures:
+                continue
+            delisted = entry.get("delisted_on")
+            listed = entry.get("listed_from")
+            if delisted and str(delisted) < start.isoformat():
+                continue
+            if listed and str(listed) > end.isoformat():
+                continue
+            report.failures[entry["ticker"]] = (
+                f"ISIN {isin} not found in any session file "
+                f"{start.isoformat()}..{end.isoformat()} ({sessions} sessions)")
     report.sessions = sessions
     return report

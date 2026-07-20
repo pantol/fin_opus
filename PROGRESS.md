@@ -90,6 +90,18 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-20 — Fix: sessionless ingest window no longer aborts `make signals`
+- A weekend/holiday-only incremental window produced phantom failures and
+  exit 2: the chart-json endpoint answers sessionless ranges with a
+  request-echo payload (loud parse failure for every index), and the
+  ISIN-never-seen check reported every active instrument against 0 session
+  files. On a weekday GPW holiday the 19:30 cron would have aborted the
+  whole evening loop (no noop, no queued-card flush). Ingest now runs the
+  equities pass first and skips both the index fetch and the absence check
+  when the window held zero sessions; benign no-op prints a friendly message
+  and exits 0. Real trading-range failures stay loud (exit 2). Suite **309
+  passing**.
+
 ### 2026-07-18 — Fresh-start scenario (new book on session 2026-07-17)
 - Separate sandbox: a brand-new 100k book bootstrapped on the Friday close →
   5 full-size BUY signals (PKO 161, PEO 69, PKN 122, ALR 52, OPL 957; ~72%

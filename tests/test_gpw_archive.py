@@ -103,6 +103,27 @@ def test_ingest_range_universe_only(conn):
     assert rows and all(r["date"] == r["as_of_date"] for r in rows)
 
 
+def test_ingest_range_sessionless_window_is_benign(conn):
+    """A weekend/holiday-only incremental window must yield ZERO failures and
+    skip the index fetch entirely (the chart-json endpoint answers sessionless
+    ranges with a request echo, not bars). `make signals` runs ingest first —
+    a phantom non-zero exit on a weekday holiday would silently skip the
+    whole evening loop."""
+    uni = _universe()
+    uni["instruments"] = [e for e in uni["instruments"] if e.get("isin")]
+
+    def no_index(name, start, end):
+        raise AssertionError("index fetch must be skipped for a sessionless window")
+
+    report = gpw.ingest_range(
+        conn, uni, date(2026, 7, 18), date(2026, 7, 19),  # Sat..Sun
+        delay_seconds=0.0,
+        fetch_session_rows=_session_rows_for, fetch_index_bars=no_index,
+    )
+    assert report.sessions == 0
+    assert report.counts == {} and report.failures == {}
+
+
 def test_ingest_range_full_market_stores_dead_tickers(conn):
     report = gpw.ingest_range(
         conn, _universe(), date(2026, 6, 25), date(2026, 6, 26),

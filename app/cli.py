@@ -77,6 +77,11 @@ def cmd_ingest(args) -> int:
     print(f"Ingested {total} bars across {len(report.counts)} tickers.")
     for tk, n in sorted(report.counts.items()):
         print(f"  {tk:10s} {n:6d} bars")
+    if not report.counts and not report.failures and report.sessions == 0:
+        # Benign no-op (e.g. incremental run whose window is all weekend or a
+        # GPW holiday) — exit 0 so the `make signals` chain continues.
+        print("\nNo trading sessions in the requested window — "
+              "nothing to ingest (weekend/holiday range).")
     if report.failures:
         print(f"\nFAILED {len(report.failures)} tickers (successes above were committed):")
         for tk, reason in sorted(report.failures.items()):

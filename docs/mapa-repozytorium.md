@@ -18,17 +18,15 @@ Od źródeł zewnętrznych, przez ingestion i bazę, po sygnały, ryzyko i wyjś
 Linie przerywane to ścieżki pomocnicze (audyt, monitoring, odczyt).
 
 ```mermaid
-flowchart TB
+flowchart LR
   subgraph EXT["Świat zewnętrzny"]
-    direction LR
     GPWA["Archiwum GPW<br/>arkusze sesji + GPW Benchmark"]
     RSS["RSS: ESPI / EBI<br/>+ serwisy newsowe"]
     YF["Yahoo Finance<br/>intraday, opóźnienie ~15 min"]
     OR["OpenRouter<br/>pinned provider + cache"]
   end
 
-  subgraph ING["app/ingestion — pobieranie i jakość danych"]
-    direction LR
+  subgraph ING["app/ingestion"]
     ARCH["gpw_archive / stooq<br/>EOD + provenance guard"]
     COLL["news_collector<br/>komunikaty point-in-time"]
     INTR["intraday<br/>rejestrator barów 5-min"]
@@ -37,27 +35,23 @@ flowchart TB
 
   DB[("SQLite · data/gpw.db<br/>25 tabel · as_of_date · user_id")]
 
-  subgraph LLMG["app/llm — warstwa TEKSTU, zawsze tylko INPUT"]
-    direction LR
+  subgraph LLMG["app/llm — TEKST, zawsze tylko INPUT"]
     RES["research<br/>ekstrakcja z komunikatu"]
     SYN["synthesis / judge<br/>werdykt → llm_score"]
   end
 
-  subgraph CORE["Deterministyczny rdzeń — zero LLM w ścieżce pieniędzy"]
-    direction LR
+  subgraph CORE["Deterministyczny rdzeń — zero LLM"]
     FEAT["features/compute<br/>+ fundamentals, point-in-time"]
     STRAT["strategy/engine<br/>YAML → ENTER / EXIT / HOLD"]
     RISK["risk/manager<br/>sizing · stopy · circuit-breaker"]
   end
 
-  subgraph EXEC["Dwaj konsumenci tego samego rdzenia"]
-    direction LR
+  subgraph EXEC["Dwaj konsumenci rdzenia"]
     PAPER["paper/loop<br/>settle → mark → decide"]
     BT["backtest/engine<br/>walk-forward OOS · fills ask/bid<br/>metrics · DSR · MC · A/B"]
   end
 
   subgraph OUT["Wyjścia i operacje"]
-    direction LR
     LOGD["logging/decisions<br/>pełny snapshot decyzji"]
     TG["alerts/telegram<br/>karty po polsku"]
     WEB["web/server<br/>dashboard read-only"]

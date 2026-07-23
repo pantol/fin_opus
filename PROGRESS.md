@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 320 passing.
+ZERO LLM in the money path. **Tests:** 340 passing.
 
 ---
 
@@ -89,6 +89,54 @@ ZERO LLM in the money path. **Tests:** 320 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-23 — Full-market tradable universe (whole GPW main market)
+- **`universe.mode: full`** (backtest.yaml, now the default): the tradable
+  universe is EVERY non-index instrument in the DB — 627 instruments incl.
+  dead tickers (anti-survivorship by construction) — instead of the 17-name
+  `universe.yaml` whitelist. `mode: config` keeps the legacy behavior;
+  `universe.yaml` remains the benchmark/index definition + curated metadata
+  (sectors, listing windows) for the named companies.
+- **Deterministic point-in-time liquidity entry gate** (`universe.liquidity`):
+  NEW entries require a bar ON the decision session (suspended names are never
+  entered on stale quotes) and a 63-session median PLN turnover
+  (`turnover_med_63`, new feature) >= 250k as of T. Missing history fails
+  closed; exits on held positions always evaluate. Zero look-ahead (tested by
+  boosting future volumes and asserting unchanged past decisions).
+- **Liquidity-tiered costs** (`costs.liquidity_tiers`): spread/slippage now
+  resolve per order from the DECISION-day turnover snapshot (5 tiers,
+  20/10 bps for >=20M PLN/day — identical to the old flat values — up to
+  250/80 bps below 250k; unknown liquidity = worst tier; commission untiered).
+  Applied identically in the engine, the paper loop (via shared
+  `_execute_order`), forced final closes, and the random-entry MC benchmark.
+- **Full-market ingest by default**: `make ingest` (GPW source) now stores the
+  ENTIRE session file when `universe.mode: full` — same number of HTTP
+  requests as before. Incremental runs resume after the last FULL-market
+  session (data-derived watermark `last_full_market_session`, threshold 100
+  instruments/day), so universe-only runs can never strand the wider market
+  stale; healed a 2026-07-11..22 gap (3248 bars / 406 tickers) on first run.
+- **Full-market performance**: bulk single-query price load, ndarray
+  `FeatureView`s (searchsorted as-of lookups instead of pandas masks; ns-unit
+  normalization for pandas 2/3 storage units), np.unique trading calendar, and
+  a vectorized MC entry-eligibility matrix. `make backtest` end-to-end on 627
+  instruments, 2015→2026 walk-forward OOS + 1000 MC sims: **~16s, <1GB RAM**.
+  Paper loop evening run: ~8s.
+- **Paper-loop guards at full scale**: session-coverage denominator now counts
+  only instruments active in the trailing `paper.activity_window_sessions`
+  (=15) so long-dead names can't dilute the gate; the config hash covers
+  universe mode/gate/tiers, so the switch demands `--accept-config-change`
+  (deliberate track-record break).
+- **Honest metrics note**: trend_momentum on the full gated universe is
+  CAGR -3.5% / Sharpe -0.87 vs WIG20TR +8.5% / 0.47 (DSR ~0, MC percentile
+  0.05-0.11) — statistically indistinguishable from the old 17-name whitelist
+  (-3.4% / -0.91): the baseline strategy has no edge; the widening changed
+  breadth, not the verdict. The system now *sees* the whole market for future
+  strategies (falling-knife etc.). Known limits (documented): archive-derived
+  instruments carry no sector (per-sector caps don't bind) and no
+  listed_from/delisted_on (the fresh-bar gate + coverage window compensate);
+  corporate-actions fixtures still cover curated names only. **Tests: 340**
+  (20 updated to pin the legacy no-gate config, 11 new in
+  `tests/test_full_universe.py`).
 
 ### 2026-07-23 — Day-6/7 simulation (sessions 2026-07-21/22) + sandbox persistence
 - Sandbox rebuilt: the original day-1…5 sandbox lived in /tmp and was lost;

@@ -15,7 +15,7 @@ from app.backtest import engine
 from app.ingestion import stooq
 from app.paper import loop, store
 
-from tests.conftest import make_stooq_csv, synthetic_series
+from tests.conftest import bt_config_no_gate, make_stooq_csv, synthetic_series
 
 
 def _ingest(conn, ticker, rows, **inst):
@@ -48,7 +48,7 @@ def _strategy():
 
 
 def _bt_cfg(**paper):
-    c = dict(cfg.load_backtest_config())
+    c = bt_config_no_gate()
     c["paper"] = paper
     return c
 

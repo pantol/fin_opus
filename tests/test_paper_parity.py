@@ -29,7 +29,7 @@ from app.ingestion import stooq
 from app.logging import decisions as declog
 from app.paper import loop, store
 
-from tests.conftest import make_stooq_csv, synthetic_series
+from tests.conftest import bt_config_no_gate, make_stooq_csv, synthetic_series
 
 N = 450  # > SMA200 + momentum_6m warmup, small enough to stay fast
 
@@ -114,7 +114,7 @@ def _universe():
 @pytest.fixture
 def market(conn):
     _seed_market(conn)
-    bt_cfg = dict(cfg.load_backtest_config())
+    bt_cfg = bt_config_no_gate()
     bt_cfg["paper"] = {"catchup_max_sessions": 100000}
     strat = cfg.load_strategy("trend_momentum")
     instruments, bench = engine.load_instruments(conn, _universe(), "wig20tr")

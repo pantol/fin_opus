@@ -107,7 +107,8 @@ def run_ab(
     than the production backtest.
     """
     bench_ticker = benchmark_ticker or universe["benchmark"]["ticker"]
-    instruments, bench_close = engine.load_instruments(conn, universe, bench_ticker)
+    instruments, bench_close = engine.load_instruments(
+        conn, universe, bench_ticker, mode=engine.universe_mode(bt_cfg))
 
     base_res = engine.run_walk_forward(
         instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,

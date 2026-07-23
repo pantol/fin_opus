@@ -169,7 +169,7 @@ def test_extract_trade_profile_pairs_and_censors():
 
 
 def _mc_setup(conn_unused=None):
-    from tests.conftest import synthetic_series
+    from tests.conftest import bt_config_no_gate, synthetic_series
     from tests.test_fill_timing import _always_enter_strategy  # reuse risk block
     import app.config as cfg
 
@@ -181,7 +181,7 @@ def _mc_setup(conn_unused=None):
     inst = engine.Instrument(instrument_id=1, ticker="aaa", sector="x",
                              listed_from=None, delisted_on=None, prices=df,
                              features=compute.compute_features(df))
-    bt_cfg = dict(cfg.load_backtest_config())
+    bt_cfg = bt_config_no_gate()
     strat = _always_enter_strategy()
     result = engine.run_backtest([inst], pd.Series(dtype=float), strat, bt_cfg)
     return inst, result, bt_cfg, strat
@@ -259,7 +259,7 @@ def test_ab_gate_fails_closed_on_missing_config():
 
 def test_full_span_fallback_is_flagged():
     """Too little history -> walk_forward_windows == 0 in metrics (NOT OOS)."""
-    from tests.conftest import synthetic_series
+    from tests.conftest import bt_config_no_gate, synthetic_series
     from tests.test_fill_timing import _always_enter_strategy
     import app.config as cfg
 
@@ -271,7 +271,7 @@ def test_full_span_fallback_is_flagged():
     inst = engine.Instrument(instrument_id=1, ticker="aaa", sector="x",
                              listed_from=None, delisted_on=None, prices=df,
                              features=compute.compute_features(df))
-    bt_cfg = dict(cfg.load_backtest_config())
+    bt_cfg = bt_config_no_gate()
     res = engine.run_walk_forward([inst], pd.Series(dtype=float),
                                   _always_enter_strategy(), bt_cfg)
     assert res.metrics.get("walk_forward_windows") == 0
@@ -317,7 +317,7 @@ def test_full_span_run_is_not_logged_as_a_trial(conn):
 
 def test_mc_marks_suspended_sessions_at_zero():
     """No-bar sessions value positions at 0 — the engine's MTM convention."""
-    from tests.conftest import synthetic_series
+    from tests.conftest import bt_config_no_gate, synthetic_series
 
     rows = synthetic_series(n=30, base=100, drift=0.0)
     idx_all = pd.DatetimeIndex([pd.Timestamp(r[0]) for r in rows])

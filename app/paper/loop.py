@@ -27,7 +27,6 @@ import pandas as pd
 
 from app.alerts import telegram
 from app.backtest import engine
-from app.features import compute
 from app.ingestion import provenance
 from app.logging import decisions as declog
 from app.paper import store
@@ -93,10 +92,14 @@ def config_hash(strategy_cfg: dict, bt_cfg: dict, universe: dict) -> str:
     these changes what the book would have done."""
     payload = {
         "strategy": strategy_cfg,
-        "costs": bt_cfg["costs"],
+        "costs": bt_cfg["costs"],   # includes liquidity_tiers when configured
         "execution": bt_cfg.get("execution", {}),
         "universe": universe.get("instruments", []),
         "universe_gate": (bt_cfg.get("universe") or {}).get("index"),
+        # Full universe section (mode / liquidity gate): switching the tradable
+        # universe source or its entry gate changes what the book would have
+        # done, so it must break the track record explicitly.
+        "universe_cfg": bt_cfg.get("universe"),
     }
     # default=str: PyYAML parses unquoted ISO dates (universe listed_from/
     # listed_to) into datetime.date; hash them as their ISO text, matching
@@ -112,6 +115,7 @@ def _paper_cfg(bt_cfg: dict) -> dict:
     p.setdefault("max_staleness_days", 4)
     p.setdefault("min_session_coverage", 0.5)
     p.setdefault("catchup_max_sessions", 10)
+    p.setdefault("activity_window_sessions", 15)
     return p
 
 
@@ -166,7 +170,9 @@ def run_signals(
 
     # --- load the exact universe/feature pipeline the backtest uses ----------
     bench = universe["benchmark"]["ticker"]
-    instruments, _bench_close = engine.load_instruments(conn, universe, bench)
+    mode = engine.universe_mode(bt_cfg)
+    instruments, _bench_close = engine.load_instruments(conn, universe, bench,
+                                                        mode=mode)
     if not instruments:
         report.reason = "no price data — run `make ingest` first"
         _alert_refusal(send_fn, report.reason, dry_run)
@@ -210,11 +216,28 @@ def run_signals(
             _alert_refusal(send_fn, report.reason, dry_run)
             return EXIT_REFUSED, report
     alive = [i for i in instruments if engine._alive(i, latest)]
-    with_bar = [i for i in alive if latest in i.prices.index]
-    if not alive or (len(with_bar) / len(alive)) < float(paper_cfg["min_session_coverage"]):
-        report.reason = (f"only {len(with_bar)}/{len(alive)} universe instruments "
-                         f"printed a bar on {latest.date().isoformat()} — partial "
-                         "ingest? refusing to decide")
+    if mode == "full":
+        # Full market: archive-discovered instruments carry no delisting
+        # metadata, so "alive" would count long-dead companies forever and
+        # dilute the coverage denominator into meaninglessness. Coverage is
+        # measured over instruments that printed >= 1 bar (point-in-time,
+        # bars <= latest) inside the trailing activity window instead.
+        n_back = int(paper_cfg["activity_window_sessions"])
+        win_start = calendar[max(0, len(calendar) - n_back)]
+        tracked = []
+        for i in alive:
+            idx = i.prices.index
+            left = idx.searchsorted(win_start)
+            right = idx.searchsorted(latest, side="right")
+            if right > left:
+                tracked.append(i)
+    else:
+        tracked = alive
+    with_bar = [i for i in tracked if latest in i.prices.index]
+    if not tracked or (len(with_bar) / len(tracked)) < float(paper_cfg["min_session_coverage"]):
+        report.reason = (f"only {len(with_bar)}/{len(tracked)} active universe "
+                         f"instruments printed a bar on {latest.date().isoformat()}"
+                         " — partial ingest? refusing to decide")
         _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
 
@@ -286,6 +309,9 @@ def run_signals(
     costs = bt_cfg["costs"]
     risk_cfg = strategy_cfg["risk"]
     atr_mult = float(risk_cfg["atr_mult_stop"])
+    # Same fast feature views + entry gate the backtest engine uses (parity).
+    views = engine.build_feature_views(instruments)
+    liq_gate = engine.liquidity_gate(bt_cfg)
 
     try:
         for day in todo:
@@ -321,7 +347,7 @@ def run_signals(
                 inst_by_ticker=inst_by_ticker, inst_by_id=inst_by_id,
                 membership=membership, strategy_cfg=strategy_cfg, risk_cfg=risk_cfg,
                 costs=costs, atr_mult=atr_mult, cash=cash, peak_equity=peak_equity,
-                warnings=report.warnings,
+                warnings=report.warnings, views=views, liq_gate=liq_gate,
             )
             store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
                              last_settled_date=day.date().isoformat())
@@ -346,7 +372,7 @@ def run_signals(
 def _process_session(
     conn, *, day, prev_day, user_id, strategy_id, instruments, inst_by_ticker,
     inst_by_id, membership, strategy_cfg, risk_cfg, costs, atr_mult, cash,
-    peak_equity, warnings,
+    peak_equity, warnings, views, liq_gate,
 ) -> tuple[float, float, SessionResult]:
     """Settle -> mark -> decide for one session, mirroring the engine loop."""
     day_iso = day.date().isoformat()
@@ -519,16 +545,28 @@ def _process_session(
                                   stop_price=pos.stop_price)
 
     # --- 3. decide on today's close; orders fill at the NEXT session's open ---
+    # Mirrors the engine's step-3 loop exactly (fast views + entry gate) so
+    # paper decisions stay byte-compatible with backtest decisions.
+    day_ns = int(day.value)
     for inst in instruments:
         if not engine._alive(inst, day):
             continue
+        in_pos = inst.ticker in positions
+        has_pending_buy = inst.ticker in pending_buys
+        has_pending_sell = inst.ticker in pending_sells
         if (membership is not None
-                and inst.ticker not in positions
+                and not in_pos
                 and not engine._member_on(membership.get(inst.instrument_id), day)):
             continue
-        snap = compute.features_at(inst.features, day_iso)
-        if snap is None:
+        view = views[inst.ticker]
+        idx = engine._view_asof_idx(view, day_ns)
+        if idx < 0:
             continue
+        if (liq_gate is not None and not in_pos and not has_pending_buy
+                and not has_pending_sell
+                and not engine._entry_gate_ok(view, idx, day_ns, liq_gate)):
+            continue
+        snap = engine._view_snapshot(view, idx)
         close = snap.get("close")
         if close is None:
             continue
@@ -539,9 +577,6 @@ def _process_session(
         if llm_relevance is not None:
             snap["llm_relevance"] = llm_relevance
 
-        in_pos = inst.ticker in positions
-        has_pending_buy = inst.ticker in pending_buys
-        has_pending_sell = inst.ticker in pending_sells
         pos = positions.get(inst.ticker)
         ctx = EvalContext(
             in_position=in_pos,

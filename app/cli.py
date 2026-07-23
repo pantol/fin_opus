@@ -49,14 +49,26 @@ def cmd_ingest(args) -> int:
         else:  # gpw (default): official session archive + GPW Benchmark indices
             from app.ingestion import gpw_archive
 
+            # Full-market storage follows universe.mode (backtest.yaml): the
+            # session file already contains EVERY listed instrument, so storing
+            # them all costs zero extra requests. --full / --universe-only
+            # override the config either way.
+            full = (args.full or engine.universe_mode(cfg.load_backtest_config())
+                    == "full") and not args.universe_only
             end = date.fromisoformat(args.end) if args.end else _default_ingest_end(
                 datetime.now(ZoneInfo("Europe/Warsaw")))
             if args.start:
                 start = date.fromisoformat(args.start)
             else:
                 # Incremental: resume after the last stored REAL bar (demo rows
-                # never anchor a live backfill); fresh DB -> 90 days.
+                # never anchor a live backfill); fresh DB -> 90 days. A FULL
+                # ingest resumes after the last FULL-MARKET session instead:
+                # universe-only runs in between advanced MAX(date) for the
+                # curated tickers only, and resuming there would leave the
+                # other ~600 instruments stale forever.
                 last = provenance.last_real_bar_date(conn)
+                if full:
+                    last = gpw_archive.last_full_market_session(conn) or last
                 start = (date.fromisoformat(last) + timedelta(days=1)
                          if last else end - timedelta(days=90))
             if start > end:
@@ -66,9 +78,9 @@ def cmd_ingest(args) -> int:
             n_days = (end - start).days + 1
             print(f"Ingesting from GPW archive: {start} .. {end} "
                   f"({n_days} calendar days, ~1 request/session day"
-                  f"{', FULL market' if args.full else ', universe only'})...")
+                  f"{', FULL market' if full else ', universe only'})...")
             report = gpw_archive.ingest_range(conn, universe, start, end,
-                                              full_market=args.full)
+                                              full_market=full)
     except provenance.DataMixingError as exc:
         print(f"ERROR: {exc}")
         conn.close()
@@ -180,7 +192,8 @@ def cmd_features(args) -> int:
     init_db(conn)
     universe = cfg.load_universe()
     bench = universe["benchmark"]["ticker"]
-    instruments, _bench = engine.load_instruments(conn, universe, bench)
+    instruments, _bench = engine.load_instruments(
+        conn, universe, bench, mode=engine.universe_mode(cfg.load_backtest_config()))
     if not instruments:
         print("No price data. Run `make ingest` first.")
         return 1
@@ -208,7 +221,8 @@ def cmd_backtest(args) -> int:
     )
 
     bench = universe["benchmark"]["ticker"]
-    instruments, bench_close = engine.load_instruments(conn, universe, bench)
+    instruments, bench_close = engine.load_instruments(
+        conn, universe, bench, mode=engine.universe_mode(bt_cfg))
     if not instruments:
         print("No price data. Run `make ingest` first.")
         return 1
@@ -644,7 +658,9 @@ def cmd_ab(args) -> int:
     baseline = cfg.load_strategy(args.baseline)
     llm = cfg.load_strategy(args.llm)
 
-    instruments, _ = engine.load_instruments(conn, universe, universe["benchmark"]["ticker"])
+    instruments, _ = engine.load_instruments(
+        conn, universe, universe["benchmark"]["ticker"],
+        mode=engine.universe_mode(bt_cfg))
     if not instruments:
         print("No price data. Run `make ingest` first.")
         return 1
@@ -786,7 +802,10 @@ def main(argv=None) -> int:
     ing.add_argument("--end", default=None, help="End date (ISO). Default: today (Warsaw)")
     ing.add_argument("--full", action="store_true",
                      help="GPW source: store EVERY PLN instrument found (anti-survivorship "
-                          "backfill), not just the configured universe")
+                          "backfill), regardless of universe.mode in backtest.yaml")
+    ing.add_argument("--universe-only", action="store_true",
+                     help="GPW source: store only config/universe.yaml instruments "
+                          "even when universe.mode is 'full'")
     sub.add_parser("purge-demo",
                    help="Delete demo (synthetic) price rows so real ingestion can proceed")
     sub.add_parser("features", help="Compute and preview features")

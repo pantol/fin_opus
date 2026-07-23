@@ -50,6 +50,40 @@ class GpwArchiveError(RuntimeError):
     """Raised when the GPW archive serves an unusable response."""
 
 
+# A real GPW session file carries hundreds of PLN instruments; a stored day
+# with fewer distinct instruments than this was NOT a full-market ingest day
+# (e.g. a universe-only incremental run). The GPW main market has held well
+# over 100 listings continuously since the 1990s, so the threshold is a
+# data-shape fact, not a tunable.
+FULL_SESSION_MIN_INSTRUMENTS = 100
+
+
+def last_full_market_session(
+        conn, min_instruments: int = FULL_SESSION_MIN_INSTRUMENTS) -> str | None:
+    """Most recent session date whose stored bars cover the whole market.
+
+    This is the FULL ingest's incremental resume point. MAX(date) alone would
+    lie after any universe-only run: those days hold bars for the curated
+    tickers while the remaining ~600 instruments went stale, and resuming
+    there would leave the gap unhealed forever. Derived from the data itself
+    (never a side-channel watermark), so a crashed or partial backfill
+    self-heals on the next run. Demo rows never count (real sources only).
+    """
+    from app.ingestion import provenance as prov
+
+    placeholders = ", ".join("?" for _ in prov.REAL_SOURCES)
+    row = conn.execute(
+        f"""
+        SELECT date FROM prices
+        WHERE adjusted = 0 AND source IN ({placeholders})
+        GROUP BY date HAVING COUNT(DISTINCT instrument_id) >= ?
+        ORDER BY date DESC LIMIT 1
+        """,  # noqa: S608 - placeholders are generated, values bound
+        (*prov.REAL_SOURCES, int(min_instruments)),
+    ).fetchone()
+    return row[0] if row else None
+
+
 @dataclass(frozen=True)
 class SessionRow:
     """One instrument's bar inside a session snapshot file."""

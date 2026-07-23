@@ -23,6 +23,10 @@ SMA_FAST = 50
 SMA_SLOW = 200
 ATR_WINDOW = 14
 VOL_WINDOW = 21  # realized volatility window (~1M)
+# Liquidity measurement window (~3M). The rolling MEDIAN of daily turnover
+# (close * volume, PLN) is robust to one-off block trades; it feeds the
+# full-market entry gate and the liquidity-tiered cost model.
+TURNOVER_WINDOW = 63
 
 PRICE_COLS = ["open", "high", "low", "close", "volume"]
 
@@ -100,13 +104,23 @@ def compute_features(df: pd.DataFrame, benchmark_close: pd.Series | None = None)
     out["atr"] = atr(df, ATR_WINDOW)
     out["realized_vol"] = realized_vol(close, VOL_WINDOW)
 
+    # Point-in-time liquidity: rolling median of PLN turnover over the past
+    # TURNOVER_WINDOW sessions (current bar included — backward-looking only).
+    # min_periods = full window: a young listing has NO liquidity measure and
+    # the entry gate treats missing as not tradable (no guessing).
+    turnover = close * df["volume"]
+    out["turnover_med_63"] = turnover.rolling(
+        TURNOVER_WINDOW, min_periods=TURNOVER_WINDOW).median()
+
     if benchmark_close is not None and not benchmark_close.empty:
         bench = benchmark_close.reindex(df.index).ffill()
         # Relative strength: 6M instrument return minus 6M benchmark return.
         bench_mom_6m = returns(bench, TD_6M)
         out["rel_strength_6m"] = out["ret_6m"] - bench_mom_6m
     else:
-        out["rel_strength_6m"] = pd.NA
+        # float NaN, not pd.NA: the panel must stay a pure float block so the
+        # engine's ndarray feature views can be built without object columns.
+        out["rel_strength_6m"] = float("nan")
 
     return out
 

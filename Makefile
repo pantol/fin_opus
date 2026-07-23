@@ -24,8 +24,10 @@ ingest-offline:
 
 # Deep anti-survivorship backfill from the GPW archive: every PLN instrument
 # in every session file (dead companies included). ~1 request/second per
-# session day — a multi-year range takes HOURS; run it once, then plain
-# `make ingest` stays incremental.
+# session day — a multi-year range takes HOURS; run it once. With
+# universe.mode=full (backtest.yaml) plain `make ingest` then keeps the WHOLE
+# market fresh incrementally (the session file already contains everything, so
+# it costs zero extra requests) and resumes after the last full-market session.
 backfill:
 	$(PYTHON) -m app.cli ingest --full --start 2015-01-02
 

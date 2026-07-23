@@ -13,6 +13,7 @@ dependencies = [
     "jsonschema>=4.0",
     "curl_cffi>=0.7",   # GPW archive sits behind a WAF: needs browser TLS impersonation
     "xlrd>=2.0",        # GPW session files are legacy BIFF .xls
+    "flask>=3.0",       # read-only per-user web dashboard (app/web)
 ]
 
 [project.optional-dependencies]

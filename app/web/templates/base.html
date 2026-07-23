@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Dashboard GPW (paper){% endblock %}</title>
+<style>
+  :root {
+    color-scheme: light;
+    --plane: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --delta-up: #006300;
+    --delta-down: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --plane: #0d0d0d;
+      --surface-1: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --delta-up: #0ca30c;
+      --delta-down: #d03b3b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--plane); color: var(--text-primary);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  a { color: inherit; }
+  header.site {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 18px 24px 0; max-width: 1120px; margin: 0 auto;
+  }
+  header.site h1 { font-size: 20px; margin: 0; }
+  header.site .db { color: var(--text-muted); font-size: 13px; }
+  main { max-width: 1120px; margin: 0 auto; padding: 14px 24px 40px; }
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px; margin-top: 16px;
+    overflow-x: auto;   /* wide tables scroll inside the card, never the page */
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .card h2 .hint { color: var(--text-muted); font-weight: 400; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .03em; color: var(--text-muted); font-weight: 600;
+    padding: 6px 10px; border-bottom: 1px solid var(--grid);
+  }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td .sub { display: block; color: var(--text-muted); font-size: 12px; }
+  .pos { color: var(--delta-up); }
+  .neg { color: var(--delta-down); }
+  .badge {
+    display: inline-block; padding: 1px 8px; border: 1px solid var(--baseline);
+    border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .tiles {
+    display: grid; gap: 12px; margin-top: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .tile .label { color: var(--text-muted); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+  .tile .value { font-size: 22px; margin-top: 2px; }
+  .tile .sub { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
+  .empty { color: var(--text-muted); padding: 6px 0; }
+  .crumbs { font-size: 13px; color: var(--text-muted); margin-top: 14px; }
+  .crumbs a { color: var(--text-secondary); }
+  footer.site {
+    max-width: 1120px; margin: 0 auto; padding: 0 24px 28px;
+    color: var(--text-muted); font-size: 12px;
+  }
+  /* chart */
+  .chartwrap { position: relative; }
+  svg.chart { width: 100%; height: auto; display: block; }
+  svg.chart .grid { stroke: var(--grid); stroke-width: 1; }
+  svg.chart .tick, svg.chart .dlabel { fill: var(--text-muted); font-size: 12px; }
+  svg.chart .dlabel { fill: var(--text-secondary); }
+  svg.chart .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  svg.chart .line.dashed { stroke-dasharray: 6 4; }
+  svg.chart .xhair { stroke: var(--baseline); stroke-width: 1; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend .sw, .tooltip .sw {
+    display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 6px; vertical-align: baseline;
+  }
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--surface-1);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+    font-size: 13px; box-shadow: 0 4px 14px rgba(0,0,0,.12); min-width: 170px;
+  }
+  .tooltip .tt-date { color: var(--text-muted); font-size: 12px; margin-bottom: 4px; }
+  .tooltip .tt-row { white-space: nowrap; }
+  details.tableview { margin-top: 10px; }
+  details.tableview summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+</style>
+</head>
+<body>
+<header class="site">
+  <h1><a href="/" style="text-decoration:none">Dashboard GPW <span style="color:var(--text-muted)">(paper)</span></a></h1>
+  <span class="db">baza: {{ db }} · tylko odczyt</span>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer class="site">Paper trading — żadne realne zlecenia nie są składane. Decyzje podejmuje wyłącznie deterministyczny kod (wieczorny <code>make signals</code>); dashboard tylko wyświetla księgę.</footer>
+</body>
+</html>

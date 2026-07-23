@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>Użytkownicy <span class="hint">— każda księga paper osobno</span></h2>
+  {% if users %}
+  <table>
+    <thead>
+      <tr>
+        <th>Użytkownik</th><th>Strategia</th>
+        <th class="num">Kapitał</th><th class="num">Gotówka</th>
+        <th class="num">Wynik od startu</th>
+        <th class="num">Pozycje</th><th class="num">Oczekujące</th>
+        <th>Start księgi</th><th>Ostatnia sesja</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td><a href="/u/{{ u.user_id }}"><strong>{{ u.user_id }}</strong></a></td>
+        <td>{% if u.strategy_name %}{{ u.strategy_name }} <span class="sub">v{{ u.strategy_version }}</span>{% else %}—{% endif %}</td>
+        <td class="num">{{ u.equity | pln }} PLN</td>
+        <td class="num">{{ u.cash | pln }} PLN</td>
+        <td class="num {% if u.ret is not none and u.ret >= 0 %}pos{% elif u.ret is not none %}neg{% endif %}">{{ u.ret | pct }}</td>
+        <td class="num">{{ u.n_open }}</td>
+        <td class="num">{{ u.n_pending }}</td>
+        <td>{{ u.inception_date }}</td>
+        <td>{{ u.last_settled_date }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Brak ksiąg paper w tej bazie — pierwszy przebieg <code>make signals</code> utworzy księgę.</p>
+  {% endif %}
+</div>
+{% endblock %}

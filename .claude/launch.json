@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "app.cli", "web", "--port", "8765"],
+      "port": 8765
+    },
+    {
+      "name": "dashboard-sandbox",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["-m", "app.cli", "--db", "data/sandbox.db", "web", "--port", "8766"],
+      "port": 8766
+    }
+  ]
+}

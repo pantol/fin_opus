@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+{% block title %}{{ state.user_id }} — Dashboard GPW{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="/">Użytkownicy</a> › <strong>{{ state.user_id }}</strong>
+  {% if state.strategy_name %} · strategia {{ state.strategy_name }} v{{ state.strategy_version }}{% endif %}
+  · księga od {{ state.inception_date }} · ostatnia rozliczona sesja {{ state.last_settled_date }}
+</div>
+
+<div class="tiles">
+  <div class="tile">
+    <div class="label">Kapitał</div>
+    <div class="value">{{ state.equity | pln }} PLN</div>
+    <div class="sub">start: {{ state.initial_capital | pln }} PLN</div>
+  </div>
+  <div class="tile">
+    <div class="label">Gotówka</div>
+    <div class="value">{{ state.cash | pln }} PLN</div>
+    <div class="sub">ekspozycja: {{ state.exposure | pct(signed=False) }}</div>
+  </div>
+  <div class="tile">
+    <div class="label">Wynik od startu</div>
+    <div class="value {% if state.ret is not none and state.ret >= 0 %}pos{% elif state.ret is not none %}neg{% endif %}">{{ state.ret | pct }}</div>
+    <div class="sub">{{ bench_label }} w tym okresie: {{ state.bench_ret | pct }}</div>
+  </div>
+  <div class="tile">
+    <div class="label">Obsunięcie od szczytu</div>
+    <div class="value">{{ state.drawdown | pct(signed=False) }}</div>
+    <div class="sub">szczyt: {{ state.peak_equity | pln }} PLN</div>
+  </div>
+  <div class="tile">
+    <div class="label">Otwarte pozycje</div>
+    <div class="value">{{ state.n_open }}</div>
+    <div class="sub">wynik niezrealizowany: {% if state.unrealized_total is not none %}<span class="{% if state.unrealized_total >= 0 %}pos{% else %}neg{% endif %}">{{ state.unrealized_total | pln }} PLN</span>{% else %}—{% endif %}</div>
+  </div>
+  <div class="tile">
+    <div class="label">Zlecenia oczekujące</div>
+    <div class="value">{{ state.n_pending }}</div>
+    <div class="sub">realizacja: otwarcie następnej sesji</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Krzywa kapitału <span class="hint">— portfel vs {{ bench_label }} (przeskalowany do kapitału startowego)</span></h2>
+  {% if chart %}
+  <div class="legend">
+    {% for s in chart.series %}
+    <span><span class="sw" style="background: var({{ s.var }})"></span>{{ s.name }}</span>
+    {% endfor %}
+  </div>
+  <div class="chartwrap">
+    <svg viewBox="0 0 {{ chart.w }} {{ chart.h }}" class="chart" id="eqchart" role="img"
+         aria-label="Krzywa kapitału portfela na tle {{ bench_label }}">
+      {% for g in chart.grid %}
+      <line x1="{{ chart.pad_l }}" x2="{{ chart.w - chart.pad_r }}" y1="{{ g.y }}" y2="{{ g.y }}" class="grid"/>
+      <text x="{{ chart.pad_l - 8 }}" y="{{ g.y }}" class="tick" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
+      {% endfor %}
+      {% for xl in chart.x_labels %}
+      <text x="{{ xl.x }}" y="{{ chart.h - 8 }}" class="tick" text-anchor="middle">{{ xl.label }}</text>
+      {% endfor %}
+      {% for s in chart.series %}
+      {% if not s.single %}
+      <polyline points="{{ s.points }}" class="line{% if not loop.first %} dashed{% endif %}" style="stroke: var({{ s.var }})"/>
+      {% endif %}
+      <circle cx="{{ s.cx }}" cy="{{ s.cy }}" r="{% if s.single %}4{% else %}3{% endif %}" style="fill: var({{ s.var }})"/>
+      <text x="{{ s.cx + 8 }}" y="{{ s.label_y }}" class="dlabel" dominant-baseline="middle">{{ s.name }}</text>
+      {% endfor %}
+      <line id="xhair" class="xhair" x1="0" x2="0" y1="{{ chart.pad_t }}" y2="{{ chart.h - chart.pad_b }}" visibility="hidden"/>
+      {% for s in chart.series %}
+      <circle class="hoverdot" id="hdot{{ loop.index0 }}" r="4" visibility="hidden" style="fill: var({{ s.var }})"/>
+      {% endfor %}
+      <rect id="overlay" x="{{ chart.pad_l }}" y="{{ chart.pad_t }}"
+            width="{{ chart.w - chart.pad_l - chart.pad_r }}"
+            height="{{ chart.h - chart.pad_t - chart.pad_b }}" fill="transparent"/>
+    </svg>
+    <div id="tooltip" class="tooltip" hidden></div>
+  </div>
+  <details class="tableview">
+    <summary>Dane wykresu (tabela)</summary>
+    <table>
+      <thead><tr><th>Sesja</th><th class="num">Portfel</th><th class="num">{{ bench_label }}</th></tr></thead>
+      <tbody>
+        {% for r in equity_rows %}
+        <tr>
+          <td>{{ r.date }}</td>
+          <td class="num">{{ r.equity | pln }} PLN</td>
+          <td class="num">{{ r.bench | pln }}{% if r.bench is not none %} PLN{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  <script id="chart-data" type="application/json">{{ chart.hover | tojson }}</script>
+  {% else %}
+  <p class="empty">Jeszcze brak punktów krzywej kapitału — pojawią się po pierwszym rozliczonym przebiegu <code>make signals</code>.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Otwarte pozycje</h2>
+  {% if open_positions %}
+  <table>
+    <thead>
+      <tr>
+        <th>Spółka</th><th class="num">Ilość</th><th>Wejście</th>
+        <th class="num">Cena wejścia</th><th class="num">Ostatni kurs</th>
+        <th class="num">Stop</th><th class="num">Do stopa</th>
+        <th class="num">Wynik</th><th class="num">Wynik %</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in open_positions %}
+      <tr>
+        <td><strong>{{ p.ticker | upper }}</strong><span class="sub">{{ p.name }}</span></td>
+        <td class="num">{{ p.qty | qty }}</td>
+        <td>{{ p.entry_date }}</td>
+        <td class="num">{{ p.entry_price | pln }}</td>
+        <td class="num">{{ p.last_close | pln }}{% if p.last_date %}<span class="sub">{{ p.last_date }}</span>{% endif %}</td>
+        <td class="num">{{ p.stop_price | pln }}</td>
+        <td class="num">{{ p.to_stop_pct | pct }}</td>
+        <td class="num {% if p.pnl is not none and p.pnl >= 0 %}pos{% elif p.pnl is not none %}neg{% endif %}">{{ p.pnl | pln }}</td>
+        <td class="num {% if p.pnl_pct is not none and p.pnl_pct >= 0 %}pos{% elif p.pnl_pct is not none %}neg{% endif %}">{{ p.pnl_pct | pct }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Brak otwartych pozycji.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Zlecenia oczekujące <span class="hint">— wypełnią się na otwarciu następnej sesji</span></h2>
+  {% if pending %}
+  <table>
+    <thead>
+      <tr><th>Akcja</th><th>Spółka</th><th class="num">Ilość</th><th class="num">Stop</th><th>Data decyzji</th></tr>
+    </thead>
+    <tbody>
+      {% for o in pending %}
+      <tr>
+        <td><span class="badge">{% if o.side == 'BUY' %}KUP{% else %}SPRZEDAJ{% endif %}</span></td>
+        <td><strong>{{ o.ticker | upper }}</strong><span class="sub">{{ o.name }}</span></td>
+        <td class="num">{{ o.qty | qty }}</td>
+        <td class="num">{{ o.stop_price | pln }}</td>
+        <td>{{ o.decision_date }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Brak zleceń oczekujących.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Zamknięte pozycje <span class="hint">— ostatnie 20</span></h2>
+  {% if closed %}
+  <table>
+    <thead>
+      <tr>
+        <th>Spółka</th><th>Wejście</th><th class="num">Cena wejścia</th>
+        <th>Wyjście</th><th class="num">Cena wyjścia</th><th class="num">Zmiana</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in closed %}
+      <tr>
+        <td><strong>{{ c.ticker | upper }}</strong><span class="sub">{{ c.name }}</span></td>
+        <td>{{ c.entry_date }}</td>
+        <td class="num">{{ c.entry_price | pln }}</td>
+        <td>{{ c.exit_date }}</td>
+        <td class="num">{{ c.exit_price | pln }}</td>
+        <td class="num {% if c.change_pct is not none and c.change_pct >= 0 %}pos{% elif c.change_pct is not none %}neg{% endif %}">{{ c.change_pct | pct }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Jeszcze żadna pozycja nie została zamknięta.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Transakcje <span class="hint">— ostatnie 20 wypełnień</span></h2>
+  {% if trades %}
+  <table>
+    <thead>
+      <tr><th>Data</th><th>Strona</th><th>Spółka</th><th class="num">Ilość</th><th class="num">Cena</th><th class="num">Prowizja</th></tr>
+    </thead>
+    <tbody>
+      {% for t in trades %}
+      <tr>
+        <td>{{ t.trade_date }}</td>
+        <td><span class="badge">{% if t.side == 'BUY' %}KUPNO{% else %}SPRZEDAŻ{% endif %}</span></td>
+        <td><strong>{{ t.ticker | upper }}</strong></td>
+        <td class="num">{{ t.qty | qty }}</td>
+        <td class="num">{{ t.price | pln }}</td>
+        <td class="num">{{ t.fee | pln }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">Jeszcze brak transakcji — pierwsze wypełnienia pojawią się po rozliczeniu zleceń oczekujących.</p>
+  {% endif %}
+</div>
+
+{% if chart %}
+<script>
+(function () {
+  "use strict";
+  var el = document.getElementById("chart-data");
+  if (!el) return;
+  var data = JSON.parse(el.textContent);
+  var svg = document.getElementById("eqchart");
+  var overlay = document.getElementById("overlay");
+  var xhair = document.getElementById("xhair");
+  var tip = document.getElementById("tooltip");
+  var wrap = svg.parentElement;
+  var fmt = new Intl.NumberFormat("pl-PL", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+  function onMove(evt) {
+    var r = svg.getBoundingClientRect();
+    var scale = r.width / svg.viewBox.baseVal.width;
+    var x = (evt.clientX - r.left) / scale;
+    var best = 0, bd = Infinity;
+    for (var i = 0; i < data.xs.length; i++) {
+      var dd = Math.abs(data.xs[i] - x);
+      if (dd < bd) { bd = dd; best = i; }
+    }
+    xhair.setAttribute("x1", data.xs[best]);
+    xhair.setAttribute("x2", data.xs[best]);
+    xhair.removeAttribute("visibility");
+    var html = '<div class="tt-date">' + data.dates[best] + "</div>";
+    data.series.forEach(function (s, si) {
+      var dot = document.getElementById("hdot" + si);
+      if (s.ys[best] == null) { dot.setAttribute("visibility", "hidden"); return; }
+      dot.setAttribute("cx", data.xs[best]);
+      dot.setAttribute("cy", s.ys[best]);
+      dot.removeAttribute("visibility");
+      html += '<div class="tt-row"><span class="sw" style="background:var(' + s.var + ')"></span>'
+            + s.name + ": <b>" + fmt.format(s.values[best]) + " PLN</b></div>";
+    });
+    tip.innerHTML = html;
+    tip.hidden = false;
+    var wr = wrap.getBoundingClientRect();
+    var left = evt.clientX - wr.left + 14;
+    var top = evt.clientY - wr.top + 14;
+    if (left + 200 > wr.width) left -= 214;
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+  function onLeave() {
+    xhair.setAttribute("visibility", "hidden");
+    tip.hidden = true;
+    data.series.forEach(function (_s, si) {
+      document.getElementById("hdot" + si).setAttribute("visibility", "hidden");
+    });
+  }
+  overlay.addEventListener("mousemove", onMove);
+  overlay.addEventListener("mouseleave", onLeave);
+})();
+</script>
+{% endif %}
+{% endblock %}

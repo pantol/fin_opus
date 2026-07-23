@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Brak bazy — Dashboard GPW{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>Baza niedostępna</h2>
+  <p class="empty">Nie można otworzyć <code>{{ db }}</code> (tylko odczyt). Uruchom najpierw <code>make ingest</code> / <code>make signals</code>, aby powstała baza z księgą paper.</p>
+</div>
+{% endblock %}

@@ -709,6 +709,18 @@ def cmd_signals(args) -> int:
     return code
 
 
+def cmd_web(args) -> int:
+    """Serve the read-only per-user dashboard. Display layer only: the SQLite
+    connection is opened mode=ro, so this process cannot touch money state."""
+    from app.web.server import create_app
+
+    web_app = create_app(args.db)
+    print(f"Dashboard: http://{args.host}:{args.port}/ "
+          f"(db: {web_app.config['DB_PATH']}, read-only)")
+    web_app.run(host=args.host, port=args.port, debug=False)
+    return 0
+
+
 def _persist_results(conn, user_id: str, result, *, strategy_id=None, params=None) -> None:
     if user_id.startswith(PAPER_PREFIX):
         # The paper loop owns the 'paper:' namespace; a backtest writing into it
@@ -827,6 +839,13 @@ def main(argv=None) -> int:
                      help="Acknowledge a strategy/cost config change and continue "
                           "the track record anyway")
 
+    web = sub.add_parser("web",
+                         help="Read-only per-user paper dashboard (display "
+                              "layer; ZERO decisions)")
+    web.add_argument("--host", default="127.0.0.1",
+                     help="Bind address (default: local only)")
+    web.add_argument("--port", type=int, default=8765)
+
     args = parser.parse_args(argv)
     if args.command == "ingest":
         return cmd_ingest(args)
@@ -858,6 +877,8 @@ def main(argv=None) -> int:
         return cmd_status(args)
     if args.command == "signals":
         return cmd_signals(args)
+    if args.command == "web":
+        return cmd_web(args)
     return 1
 
 

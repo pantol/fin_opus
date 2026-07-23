@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop intraday intraday-loop refdata check-data backup restore-test status signals label eval-llm clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop intraday intraday-loop refdata check-data backup restore-test status signals label eval-llm web clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -112,6 +112,11 @@ status:
 # Cron (evening, Warsaw): 30 19 * * 1-5  cd /opt/fin_opus && make signals
 signals: ingest
 	$(PYTHON) -m app.cli signals
+
+# Read-only per-user web dashboard (display layer, ZERO decisions).
+# Serves data/gpw.db on http://127.0.0.1:8765 by default.
+web:
+	$(PYTHON) -m app.cli web
 
 clean:
 	rm -f data/*.db

@@ -3,7 +3,8 @@
 
 name: trend_momentum
 version: 1
-universe: wig20
+# The tradable universe is configured in backtest.yaml (universe.mode +
+# liquidity gate + optional index membership), not per strategy.
 
 # Entry: long when close > SMA200 AND 6M momentum > 0.
 entry:

@@ -16,6 +16,29 @@ def conn():
     c.close()
 
 
+def bt_config_no_gate() -> dict:
+    """The real backtest.yaml minus the full-market entry gate and cost tiers.
+
+    For tests that exercise OTHER mechanics (fills, corporate actions, paper
+    plumbing, accounting) on SHORT synthetic histories: the production
+    liquidity gate needs a full 63-session turnover window and would push
+    every entry past the scenario, and the cost tiers would re-price fills the
+    assertions pin. The production gate/tiers have their own dedicated tests
+    (tests/test_full_universe.py).
+    """
+    from app import config as cfg
+
+    bt = dict(cfg.load_backtest_config())
+    uni = dict(bt.get("universe") or {})
+    uni["mode"] = "config"
+    uni.pop("liquidity", None)
+    bt["universe"] = uni
+    costs = dict(bt["costs"])
+    costs.pop("liquidity_tiers", None)
+    bt["costs"] = costs
+    return bt
+
+
 def make_stooq_csv(rows: list[tuple[str, float, float, float, float, float]]) -> str:
     """Build a Stooq-format CSV string from (date,o,h,l,c,v) rows."""
     lines = ["Data,Otwarcie,Najwyzszy,Najnizszy,Zamkniecie,Wolumen"]

@@ -1,4 +1,11 @@
-# GPW universe. Anti-survivorship: includes delisted/dead tickers.
+# GPW reference config: benchmark + indices + CURATED instrument metadata
+# (readable tickers, sectors for exposure limits, listing windows, ISINs).
+#
+# ROLE CHANGE with universe.mode=full (backtest.yaml): the tradable universe
+# is the WHOLE market from the DB (every instrument the GPW session archive
+# delivers, dead tickers included) — this file is then metadata/overrides for
+# the curated names plus the benchmark/index definitions, NOT the tradable
+# whitelist. With universe.mode=config it remains the legacy whitelist.
 # Stooq symbols (lowercase). Indices use Stooq index codes.
 # market: GPW. sector kept coarse for Phase 0+1 exposure limits.
 

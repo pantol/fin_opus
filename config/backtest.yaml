@@ -10,6 +10,18 @@ costs:
   spread_bps: 20.0              # half applied each side (buy at ask, sell at bid)
   slippage_bps: 10.0           # base slippage per side
   max_volume_participation: 0.10  # cannot trade > 10% of the day's volume
+  # Liquidity-tiered spread/slippage (full-market realism): the tier with the
+  # highest floor <= the instrument's POINT-IN-TIME 63-session median PLN
+  # turnover (measured on the decision session) replaces the flat values.
+  # Unknown/unmeasurable liquidity gets the worst (lowest-floor) tier. The
+  # best tier equals the previous flat values, so blue-chip costs never got
+  # optimistically cheaper than the pre-tier model; commission is never tiered.
+  liquidity_tiers:
+    - { min_median_turnover_pln: 20000000, spread_bps: 20.0,  slippage_bps: 10.0 }
+    - { min_median_turnover_pln: 5000000,  spread_bps: 35.0,  slippage_bps: 15.0 }
+    - { min_median_turnover_pln: 1000000,  spread_bps: 60.0,  slippage_bps: 25.0 }
+    - { min_median_turnover_pln: 250000,   spread_bps: 120.0, slippage_bps: 40.0 }
+    - { min_median_turnover_pln: 0,        spread_bps: 250.0, slippage_bps: 80.0 }
 
 walk_forward:
   in_sample_months: 24
@@ -29,12 +41,27 @@ validation:
     min_dsr: 0.95               # Deflated Sharpe Ratio (probability) floor
     min_random_percentile: 0.95 # strategy Sharpe percentile vs cost-matched randomness
 
-# Optional point-in-time universe gate. When `index` names an index (e.g.
-# wig20), NEW entries are only evaluated for instruments that are members as
-# of T per the index_membership table (`python -m app.cli refdata` loads it).
-# null = trade the full universe.yaml list (default; membership not consulted).
+# Tradable universe.
+#   mode: full   = EVERY non-index instrument in the DB — the whole GPW main
+#                  market, dead tickers included (anti-survivorship by
+#                  construction; `make ingest` keeps it fresh from the GPW
+#                  session archive at zero extra requests).
+#   mode: config = only config/universe.yaml instruments (legacy whitelist).
+# `index`: optional point-in-time membership gate — when it names an index
+# (e.g. wig20), NEW entries are only evaluated for members as of T per the
+# index_membership table (`python -m app.cli refdata` loads it). null = no
+# membership gate.
+# `liquidity`: deterministic point-in-time ENTRY gate (exits always evaluate).
+# An instrument is an entry candidate at T only if it printed a bar ON T
+# (require_fresh_bar — suspended names are never entered on stale prices) and
+# its 63-session median PLN turnover as of T clears the floor. Instruments
+# younger than 63 sessions have no measure and fail closed (no IPO-pop buys).
 universe:
+  mode: full
   index: null
+  liquidity:
+    min_median_turnover_pln: 250000   # ~ liquid sWIG80 and up
+    require_fresh_bar: true
 
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)
@@ -48,3 +75,8 @@ paper:
   max_staleness_days: 4         # refuse to decide when the latest session is older
   min_session_coverage: 0.5     # refuse when < 50% of the universe printed a bar
   catchup_max_sessions: 10      # refuse to silently churn through a bigger gap
+  # universe.mode=full only: the coverage denominator counts instruments with
+  # >= 1 bar in this many trailing sessions (dead/suspended names drop out of
+  # the denominator instead of diluting it forever — archive-discovered
+  # instruments carry no delisting metadata).
+  activity_window_sessions: 15

@@ -30,6 +30,37 @@ def _commission(notional: float, costs: dict) -> float:
     return max(notional * bps, float(costs["commission_min"]))
 
 
+def resolve_costs(costs: dict, median_turnover: float | None) -> dict:
+    """Effective costs for one order under the liquidity-tier model.
+
+    `costs["liquidity_tiers"]` (optional) is a list of
+    {min_median_turnover_pln, spread_bps, slippage_bps}. The tier with the
+    HIGHEST floor <= `median_turnover` wins; spread/slippage of that tier
+    replace the flat values. Commission is broker-schedule, never tiered.
+
+    - No tiers configured -> `costs` returned unchanged (flat legacy model).
+    - `median_turnover` None/NaN (instrument has no full liquidity window)
+      -> the LOWEST-floor tier: unknown liquidity is priced at the most
+      expensive configured bucket, never optimistically.
+
+    Deterministic pure function; callers pass the POINT-IN-TIME median
+    turnover measured on the DECISION session (never the fill bar).
+    """
+    tiers = costs.get("liquidity_tiers")
+    if not tiers:
+        return costs
+    by_floor = sorted(tiers, key=lambda t: float(t["min_median_turnover_pln"]))
+    chosen = by_floor[0]  # conservative fallback: most expensive bucket
+    if median_turnover is not None and not math.isnan(median_turnover):
+        for tier in by_floor:
+            if float(median_turnover) >= float(tier["min_median_turnover_pln"]):
+                chosen = tier
+    resolved = dict(costs)
+    resolved["spread_bps"] = float(chosen["spread_bps"])
+    resolved["slippage_bps"] = float(chosen["slippage_bps"])
+    return resolved
+
+
 def apply_volume_cap(requested_qty: int, bar_volume: float, costs: dict) -> int:
     """Maximum fillable quantity given the bar's volume."""
     participation = float(costs["max_volume_participation"])

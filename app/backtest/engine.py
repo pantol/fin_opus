@@ -49,6 +49,13 @@ class Instrument:
     delisted_on: str | None
     prices: pd.DataFrame      # full history (date-indexed)
     features: pd.DataFrame    # precomputed feature panel (date-indexed)
+    # Cached listing-window bounds (derived, not init args): _alive runs for
+    # every (instrument, day) pair, and parsing ISO strings there is the
+    # difference between seconds and minutes at full-market scale.
+    listed_from_ts: pd.Timestamp | None = field(init=False, default=None,
+                                                repr=False, compare=False)
+    delisted_on_ts: pd.Timestamp | None = field(init=False, default=None,
+                                                repr=False, compare=False)
     # Optional point-in-time LLM scores (date-indexed Series in [-1, 1]).
     # When present, the as-of value is injected as `llm_score` into the snapshot.
     # The LLM is ALWAYS only an INPUT here -- sizing/risk stays deterministic.
@@ -60,6 +67,12 @@ class Instrument:
     # {action_type, value_or_ratio}. Used to shield stops/positions from gaps
     # that are not market moves (splits, dividends, rights issues).
     actions: dict[str, list[dict]] | None = None
+
+    def __post_init__(self) -> None:
+        self.listed_from_ts = (pd.to_datetime(self.listed_from)
+                               if self.listed_from else None)
+        self.delisted_on_ts = (pd.to_datetime(self.delisted_on)
+                               if self.delisted_on else None)
 
 
 @dataclass
@@ -79,34 +92,89 @@ class BacktestResult:
 
 
 def _alive(inst: Instrument, day: pd.Timestamp) -> bool:
-    if inst.listed_from and day < pd.to_datetime(inst.listed_from):
+    if inst.listed_from_ts is not None and day < inst.listed_from_ts:
         return False
-    if inst.delisted_on and day > pd.to_datetime(inst.delisted_on):
+    if inst.delisted_on_ts is not None and day > inst.delisted_on_ts:
         return False
     return True
 
 
-def load_instruments(conn, universe: dict, benchmark_ticker: str) -> tuple[list[Instrument], pd.Series]:
-    """Load tradable instruments (restricted to the universe config) + benchmark.
+UNIVERSE_MODES = ("config", "full")
 
-    Only tickers listed under `universe["instruments"]` are traded; this prevents
-    a reused SQLite DB from trading stale or out-of-config tickers.
+
+def universe_mode(bt_cfg: dict) -> str:
+    """The tradable-universe source configured in backtest.yaml.
+
+    'config' (legacy default) = only universe.yaml instruments;
+    'full' = every non-index instrument in the DB (whole market).
     """
+    mode = str((bt_cfg.get("universe") or {}).get("mode", "config"))
+    if mode not in UNIVERSE_MODES:
+        raise ValueError(f"universe.mode must be one of {UNIVERSE_MODES}, got {mode!r}")
+    return mode
+
+
+def _load_all_prices(conn) -> dict[int, pd.DataFrame]:
+    """Bulk-load raw price history for EVERY instrument in one query.
+
+    Full-market loading issues one scan instead of one query per instrument
+    (600+ round-trips). Same point-in-time posture as load_prices_asof with
+    as_of='9999-12-31': the engine loads full history once and enforces
+    `bar date <= T` per decision day (as_of_date == date for EOD bars).
+    """
+    rows = conn.execute(
+        """
+        SELECT instrument_id, date, open, high, low, close, volume
+        FROM prices WHERE adjusted = 0
+          AND instrument_id IN (SELECT id FROM instruments WHERE is_index = 0)
+        ORDER BY instrument_id, date
+        """
+    ).fetchall()
+    if not rows:
+        return {}
+    df = pd.DataFrame(rows, columns=["instrument_id"] + ["date"] + compute.PRICE_COLS)
+    df["date"] = pd.to_datetime(df["date"])
+    out: dict[int, pd.DataFrame] = {}
+    for inst_id, group in df.groupby("instrument_id", sort=True):
+        out[int(inst_id)] = group.drop(columns=["instrument_id"]).set_index("date")
+    return out
+
+
+def load_instruments(conn, universe: dict, benchmark_ticker: str,
+                     *, mode: str = "config") -> tuple[list[Instrument], pd.Series]:
+    """Load tradable instruments + benchmark.
+
+    mode='config' (legacy): only tickers listed under `universe["instruments"]`
+    are traded — prevents a reused SQLite DB from trading out-of-config tickers.
+    mode='full': EVERY non-index instrument holding price data is loaded —
+    the whole market, dead tickers included (anti-survivorship). Instruments
+    discovered from archive session files carry no sector/listing metadata;
+    the liquidity entry gate and per-day bar checks keep them safe to trade.
+    """
+    if mode not in UNIVERSE_MODES:
+        raise ValueError(f"unknown universe mode {mode!r}")
     bench_close = _load_close_series(conn, benchmark_ticker)
 
     allowed = {i["ticker"].lower() for i in universe.get("instruments", [])}
+    price_map = _load_all_prices(conn) if mode == "full" else None
 
     instruments: list[Instrument] = []
     rows = conn.execute(
-        "SELECT id, ticker, sector, listed_from, delisted_on, is_index FROM instruments"
+        "SELECT id, ticker, sector, listed_from, delisted_on, is_index"
+        " FROM instruments ORDER BY id"
     ).fetchall()
     bench_for_features = bench_close
     for r in rows:
         if r["is_index"]:
             continue  # indices are not traded
-        if r["ticker"].lower() not in allowed:
+        if mode == "config" and r["ticker"].lower() not in allowed:
             continue  # not part of the configured universe
-        df = compute.load_prices_asof(conn, r["id"], as_of="9999-12-31")
+        if price_map is not None:
+            df = price_map.get(int(r["id"]))
+            if df is None:
+                continue
+        else:
+            df = compute.load_prices_asof(conn, r["id"], as_of="9999-12-31")
         if df.empty:
             continue
         feats = compute.compute_features(df, benchmark_close=bench_for_features)
@@ -178,11 +246,107 @@ def _load_close_series(conn, ticker: str) -> pd.Series:
     return df["close"] if not df.empty else pd.Series(dtype=float)
 
 
+def _index_ns(index: pd.DatetimeIndex) -> np.ndarray:
+    """Date index as int64 NANOSECONDS, regardless of the index's storage unit.
+
+    pandas 2/3 may back an index with datetime64[s]/[us]; `.asi8` then yields
+    that unit while `Timestamp.value` is always ns — comparing the two would
+    silently break every as-of lookup. Normalizing here makes the unit a
+    non-issue everywhere downstream.
+    """
+    return index.as_unit("ns").asi8
+
+
 def _trading_calendar(instruments: list[Instrument]) -> pd.DatetimeIndex:
-    all_dates: set[pd.Timestamp] = set()
-    for inst in instruments:
-        all_dates.update(inst.prices.index.tolist())
-    return pd.DatetimeIndex(sorted(all_dates))
+    if not instruments:
+        return pd.DatetimeIndex([])
+    # np.unique over raw int64 date values: a Python set of Timestamps costs
+    # minutes at full-market scale (1M+ bars), this costs milliseconds.
+    arrays = [_index_ns(inst.prices.index) for inst in instruments]
+    return pd.DatetimeIndex(np.unique(np.concatenate(arrays)).view("datetime64[ns]"))
+
+
+# --- fast point-in-time feature access ---------------------------------------
+# The day loop asks "last feature row on/before T" for every (instrument, day)
+# pair — hundreds of thousands to millions of times at full-market scale. A
+# pandas mask per call is O(rows); these views make the lookup O(log rows) and
+# build the snapshot dict only for instruments that actually get evaluated.
+
+@dataclass
+class FeatureView:
+    dates_ns: np.ndarray        # int64 ns since epoch, ascending (feature index)
+    values: np.ndarray          # float64 [n_rows, n_cols]; NaN = missing
+    columns: tuple[str, ...]
+    turnover_col: int | None    # index of turnover_med_63, None if absent
+
+
+def build_feature_view(features: pd.DataFrame) -> FeatureView:
+    values = features.to_numpy(dtype=float, na_value=np.nan)
+    cols = tuple(str(c) for c in features.columns)
+    turnover_col = cols.index("turnover_med_63") if "turnover_med_63" in cols else None
+    return FeatureView(dates_ns=_index_ns(features.index), values=values,
+                       columns=cols, turnover_col=turnover_col)
+
+
+def build_feature_views(instruments: list[Instrument]) -> dict[str, FeatureView]:
+    return {inst.ticker: build_feature_view(inst.features) for inst in instruments}
+
+
+def _view_asof_idx(view: FeatureView, day_ns: int) -> int:
+    """Row index of the last bar on/before `day_ns`, or -1 (point-in-time)."""
+    return int(np.searchsorted(view.dates_ns, day_ns, side="right")) - 1
+
+
+def _view_snapshot(view: FeatureView, idx: int) -> dict:
+    """Feature snapshot dict — value-identical to compute.features_at."""
+    row = view.values[idx]
+    snap = {c: (None if np.isnan(v) else float(v))
+            for c, v in zip(view.columns, row)}
+    snap["bar_date"] = pd.Timestamp(view.dates_ns[idx]).date().isoformat()
+    return snap
+
+
+def _view_turnover(view: FeatureView, idx: int) -> float | None:
+    """Point-in-time liquidity (turnover_med_63) at a view row, or None."""
+    if view.turnover_col is None or idx < 0:
+        return None
+    val = float(view.values[idx, view.turnover_col])
+    return None if np.isnan(val) else val
+
+
+# --- deterministic entry gate (full-market safety) ----------------------------
+
+def liquidity_gate(bt_cfg: dict) -> dict | None:
+    """Parsed universe.liquidity entry gate, or None when not configured.
+
+    The gate applies to NEW entries only (exits on held positions always
+    evaluate) and is measured point-in-time: the turnover median at T uses
+    bars <= T only (the rolling window in the feature panel is backward-looking).
+    """
+    liq = (bt_cfg.get("universe") or {}).get("liquidity")
+    if not liq:
+        return None
+    return {
+        "min_turnover": float(liq.get("min_median_turnover_pln", 0.0)),
+        "require_fresh_bar": bool(liq.get("require_fresh_bar", True)),
+    }
+
+
+def _entry_gate_ok(view: FeatureView, idx: int, day_ns: int, gate: dict) -> bool:
+    """True when the instrument is an eligible NEW-entry candidate at T.
+
+    - require_fresh_bar: the instrument printed a bar ON T (suspended /
+      stale-quoted names must never be entered on old prices);
+    - liquidity floor: 63-session median turnover as of T >= the configured
+      minimum; missing (young listing / no data) fails closed.
+    """
+    if gate["require_fresh_bar"] and view.dates_ns[idx] != day_ns:
+        return False
+    if gate["min_turnover"] > 0.0:
+        turnover = _view_turnover(view, idx)
+        if turnover is None or turnover < gate["min_turnover"]:
+            return False
+    return True
 
 
 def run_backtest(
@@ -215,6 +379,8 @@ def run_backtest(
             "would execute at prices already used to generate the signal"
         )
     atr_mult = float(risk_cfg["atr_mult_stop"])
+    liq_gate = liquidity_gate(bt_cfg)
+    views = build_feature_views(instruments)
 
     calendar = _trading_calendar(instruments)
     if start is not None:
@@ -316,18 +482,32 @@ def run_backtest(
         fill_index = di + lag
 
         # --- 3. evaluate signals on each instrument's close at T ---
+        day_ns = int(day.value)
         for inst in instruments:
             if not _alive(inst, day):
                 continue
+            in_pos = inst.ticker in positions
+            has_pending_buy = inst.ticker in pending_buys
+            has_pending_sell = inst.ticker in pending_sells
             # Point-in-time universe: non-members as of T are not candidates for
             # NEW entries; held positions keep evaluating so exits still fire.
             if (membership is not None
-                    and inst.ticker not in positions
+                    and not in_pos
                     and not _member_on(membership.get(inst.instrument_id), day)):
                 continue
-            snap = compute.features_at(inst.features, day.date().isoformat())
-            if snap is None:
+            view = views[inst.ticker]
+            idx = _view_asof_idx(view, day_ns)
+            if idx < 0:
                 continue
+            # Deterministic entry gate (fresh bar + liquidity floor): a pure
+            # entry candidate that fails it cannot produce any state change,
+            # so skip the snapshot/evaluation work entirely — this is what
+            # keeps the loop fast when the universe is the whole market.
+            if (liq_gate is not None and not in_pos and not has_pending_buy
+                    and not has_pending_sell
+                    and not _entry_gate_ok(view, idx, day_ns, liq_gate)):
+                continue
+            snap = _view_snapshot(view, idx)
             close = snap.get("close")
             if close is None:
                 continue
@@ -341,9 +521,6 @@ def run_backtest(
             if llm_relevance is not None:
                 snap["llm_relevance"] = llm_relevance
 
-            in_pos = inst.ticker in positions
-            has_pending_buy = inst.ticker in pending_buys
-            has_pending_sell = inst.ticker in pending_sells
             pos = positions.get(inst.ticker)
             ctx = EvalContext(
                 in_position=in_pos,
@@ -393,9 +570,15 @@ def run_backtest(
             ref = _close_on(inst, last_day)
             if ref is None:
                 continue
+            # Forced paper close prices the exit at the instrument's own
+            # liquidity tier (point-in-time turnover as of the final session).
+            view = views[tk]
+            eff_costs = (fillmod.resolve_costs(
+                costs, _view_turnover(view, _view_asof_idx(view, int(last_day.value))))
+                if view.turnover_col is not None else costs)
             fill = fillmod.simulate_fill(
                 side="SELL", requested_qty=pos.qty, reference_price=ref,
-                bar_volume=_volume_on(inst, last_day), costs=costs,
+                bar_volume=_volume_on(inst, last_day), costs=eff_costs,
             )
             if fill.qty <= 0:
                 continue
@@ -716,9 +899,19 @@ def _execute_order(order, day, inst_by_ticker, costs, positions, trade_pnls, dec
         return 0.0, 0.0, 0  # no bar to fill on (e.g., delisted) -> order lapses
     vol = _volume_on(inst, day)
 
+    # Liquidity-tiered spread/slippage, resolved from the DECISION-day snapshot
+    # the order carries (point-in-time: never the fill bar). An order whose
+    # snapshot predates the liquidity feature keeps the flat cost model — an
+    # in-flight legacy order must not be silently repriced into a worse tier.
+    feats = order.get("features") or {}
+    if "turnover_med_63" in feats:
+        eff_costs = fillmod.resolve_costs(costs, feats["turnover_med_63"])
+    else:
+        eff_costs = costs
+
     fill = fillmod.simulate_fill(
         side=order["side"], requested_qty=order["qty"], reference_price=ref,
-        bar_volume=vol, costs=costs,
+        bar_volume=vol, costs=eff_costs,
     )
     if fill.qty <= 0:
         # nothing filled; for a SELL the whole quantity remains to retry

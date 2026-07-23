@@ -14,7 +14,7 @@ from app.backtest import engine
 from app.ingestion import refdata, stooq
 from app.ingestion.stooq import Bar
 
-from tests.conftest import make_stooq_csv
+from tests.conftest import bt_config_no_gate, make_stooq_csv
 
 
 def _flat_rows(n, base, start="2019-01-01"):
@@ -82,7 +82,7 @@ def _run_gap_case(conn, ticker, gapped, base, action=None, volume_scale_after=1.
            "instruments": [{"ticker": ticker, "sector": "x"}]}
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
     res = engine.run_backtest(instruments, bench, _stop_only_strategy(),
-                              cfg.load_backtest_config())
+                              bt_config_no_gate())
     return res, ex_date
 
 
@@ -165,7 +165,7 @@ def test_weekend_ex_date_bridges_to_next_session(conn):
            "instruments": [{"ticker": "wknd", "sector": "x"}]}
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
     res = engine.run_backtest(instruments, bench, _stop_only_strategy(),
-                              cfg.load_backtest_config())
+                              bt_config_no_gate())
     assert not _exits_on(res, session_ex_date), (
         "a weekend-dated action must bridge to the next session, not vanish"
     )
@@ -188,7 +188,7 @@ def test_reverse_split_scales_pending_buy_qty(conn):
            "instruments": [{"ticker": "rsplit", "sector": "x"}]}
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
     res = engine.run_backtest(instruments, bench, _stop_only_strategy(),
-                              cfg.load_backtest_config())
+                              bt_config_no_gate())
 
     enters = [d for d in res.decisions if d["action"] == "ENTER"]
     assert enters, "expected the straddling BUY to fill"

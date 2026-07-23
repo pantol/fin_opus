@@ -36,7 +36,7 @@ import pandas as pd
 
 from app.backtest import fills as fillmod
 from app.backtest import metrics as metricsmod
-from app.backtest.engine import Instrument, _member_on
+from app.backtest.engine import Instrument, _member_on, liquidity_gate
 from app.risk import manager as risk
 
 
@@ -112,6 +112,12 @@ class _InstArrays:
     atr: np.ndarray        # NaN where unavailable
     has_bar: np.ndarray    # bool
     alive: np.ndarray      # bool (listing window + membership if provided)
+    # Point-in-time liquidity per session: turnover_med_63 as of each calendar
+    # day (last known value <= day). Drives the SAME entry gate and the SAME
+    # liquidity-tiered costs the real strategy pays; has_turnover=False keeps
+    # the flat legacy cost model for feature panels without the column.
+    turn_at: np.ndarray = None  # type: ignore[assignment]
+    has_turnover: bool = False
 
 
 def _prepare(instruments: list[Instrument], calendar: pd.DatetimeIndex,
@@ -134,18 +140,50 @@ def _prepare(instruments: list[Instrument], calendar: pd.DatetimeIndex,
         if membership is not None:
             ranges = membership.get(inst.instrument_id)
             alive &= np.array([_member_on(ranges, day) for day in calendar])
+        has_turnover = "turnover_med_63" in inst.features.columns
+        turn_at = (inst.features["turnover_med_63"].reindex(calendar).ffill()
+                   .to_numpy(dtype=float)
+                   if has_turnover else np.full(len(calendar), np.nan))
         out.append(_InstArrays(
             ticker=inst.ticker, sector=inst.sector, instrument_id=inst.instrument_id,
             open=prices["open"].to_numpy(dtype=float),
             close_mark=close_mark,
             volume=prices["volume"].fillna(0.0).to_numpy(dtype=float),
             atr=atr, has_bar=has_bar, alive=alive,
+            turn_at=turn_at, has_turnover=has_turnover,
         ))
     return out
 
 
+def _entry_ok_matrix(arrays: list[_InstArrays], calendar_len: int,
+                     bt_cfg: dict) -> np.ndarray:
+    """[session, instrument] eligibility for a random ENTRY signal.
+
+    Vectorized version of the engine's per-day candidate conditions: alive,
+    bar on the signal session AND the fill session, valid ATR, and the same
+    deterministic liquidity floor the real strategy is gated by. A per-attempt
+    Python scan over instruments is O(universe) per attempt and dominates the
+    simulation at full-market scale; one boolean matrix makes it O(1)-ish.
+    """
+    gate = liquidity_gate(bt_cfg)
+    ok_matrix = np.zeros((calendar_len, len(arrays)), dtype=bool)
+    for j, a in enumerate(arrays):
+        ok = a.alive & a.has_bar & ~np.isnan(a.atr) & (a.atr > 0)
+        if calendar_len:
+            ok[:-1] &= a.has_bar[1:]
+            ok[-1] = False  # no next session to fill on
+        if gate is not None and gate["min_turnover"] > 0.0:
+            if a.has_turnover:
+                ok &= ~np.isnan(a.turn_at) & (a.turn_at >= gate["min_turnover"])
+            else:
+                ok[:] = False  # unmeasurable liquidity fails closed (engine parity)
+        ok_matrix[:, j] = ok
+    return ok_matrix
+
+
 def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
-                  calendar: pd.DatetimeIndex, n_entries: int, holdings: list[int],
+                  entry_ok: np.ndarray, calendar: pd.DatetimeIndex,
+                  n_entries: int, holdings: list[int],
                   bt_cfg: dict, risk_cfg: dict) -> tuple[dict, int]:
     """One random strategy run. Returns (metrics dict, shortfall count).
 
@@ -176,8 +214,18 @@ def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
 
     def _close_position(p: dict, idx: int) -> None:
         """Execute a time-based exit; volume-capped remainders retry on later
-        sessions (deltas land on their true sessions, never earlier)."""
+        sessions (deltas land on their true sessions, never earlier).
+
+        Costs are resolved ONCE at the exit-decision session (idx - 1, the
+        engine's decision->next-open contract); retries keep that tier, exactly
+        like the engine's re-queued orders keep their decision-day snapshot.
+        """
         arr = p["arr"]
+        if arr.has_turnover:
+            exit_costs = fillmod.resolve_costs(
+                costs, float(arr.turn_at[idx - 1]) if idx >= 1 else None)
+        else:
+            exit_costs = costs
         remaining = p["qty"]
         t = idx
         while remaining > 0 and t <= last:
@@ -187,7 +235,7 @@ def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
                     fill = fillmod.simulate_fill(side="SELL", requested_qty=remaining,
                                                  reference_price=float(ref),
                                                  bar_volume=float(arr.volume[t]),
-                                                 costs=costs)
+                                                 costs=exit_costs)
                     if fill.qty > 0:
                         cash_deltas[t] += fill.price * fill.qty - fill.fee
                         trade_pnls.append((fill.price - p["entry_price"]) * fill.qty - fill.fee)
@@ -220,15 +268,14 @@ def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
             continue
 
         # ALL eligible instruments at this session, picked uniformly (a partial
-        # random scan would miss eligible names and thin out the null)
-        eligible = [a for a in arrays
-                    if a.alive[signal_idx] and a.has_bar[signal_idx]
-                    and a.has_bar[fill_idx]
-                    and not np.isnan(a.atr[signal_idx]) and a.atr[signal_idx] > 0]
-        if not eligible:
+        # random scan would miss eligible names and thin out the null). The
+        # precomputed matrix folds in the engine's entry conditions, including
+        # the liquidity gate the real strategy is subject to.
+        eligible_idx = np.flatnonzero(entry_ok[signal_idx])
+        if eligible_idx.size == 0:
             _respawn()
             continue
-        chosen = eligible[int(rng.integers(0, len(eligible)))]
+        chosen = arrays[int(eligible_idx[int(rng.integers(0, eligible_idx.size))])]
 
         cash_now = _cash_at(signal_idx)
         equity_now = cash_now + float(holdings_curve[signal_idx])
@@ -258,10 +305,14 @@ def _simulate_one(rng: np.random.Generator, arrays: list[_InstArrays],
         ref = chosen.open[fill_idx]
         if np.isnan(ref) or ref <= 0:
             ref = chosen.close_mark[fill_idx]
+        # Same tier resolution as the engine: liquidity measured on the SIGNAL
+        # session (point-in-time), never the fill bar.
+        entry_costs = (fillmod.resolve_costs(costs, float(chosen.turn_at[signal_idx]))
+                       if chosen.has_turnover else costs)
         fill = fillmod.simulate_fill(side="BUY", requested_qty=sizing.qty,
                                      reference_price=float(ref),
                                      bar_volume=float(chosen.volume[fill_idx]),
-                                     costs=costs)
+                                     costs=entry_costs)
         if fill.qty <= 0:
             _respawn()
             continue
@@ -298,11 +349,12 @@ def run_random_benchmark(instruments: list[Instrument], real_result, bt_cfg: dic
         return result
 
     arrays = _prepare(instruments, calendar, membership)
+    entry_ok = _entry_ok_matrix(arrays, len(calendar), bt_cfg)
     sims: dict[str, list[float]] = {"cagr": [], "sharpe": [], "max_drawdown": []}
     for i in range(n_sims):
         rng = np.random.default_rng([int(seed), i])
-        metrics, shortfall = _simulate_one(rng, arrays, calendar, n_entries,
-                                           holdings, bt_cfg, risk_cfg)
+        metrics, shortfall = _simulate_one(rng, arrays, entry_ok, calendar,
+                                           n_entries, holdings, bt_cfg, risk_cfg)
         result.shortfall_entries += shortfall
         for k in sims:
             sims[k].append(float(metrics[k]))

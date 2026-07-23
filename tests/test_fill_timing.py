@@ -13,7 +13,7 @@ from app import config as cfg
 from app.backtest import engine
 from app.ingestion import stooq
 
-from tests.conftest import make_stooq_csv, synthetic_series
+from tests.conftest import bt_config_no_gate, make_stooq_csv, synthetic_series
 
 
 def _ingest(conn, ticker, rows, **inst):
@@ -43,7 +43,7 @@ def _universe():
 
 def _run(conn, bt_cfg=None):
     uni = _universe()
-    bt_cfg = bt_cfg or cfg.load_backtest_config()
+    bt_cfg = bt_cfg or bt_config_no_gate()
     strat = cfg.load_strategy("trend_momentum")
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
     return engine.run_walk_forward(instruments, bench, strat, bt_cfg), instruments
@@ -66,7 +66,7 @@ def test_fill_price_derives_from_fill_day_open(conn):
     _seed(conn)
     res, instruments = _run(conn)
     inst_by_ticker = {i.ticker: i for i in instruments}
-    costs = cfg.load_backtest_config()["costs"]
+    costs = bt_config_no_gate()["costs"]
     half_spread = costs["spread_bps"] * 1e-4 / 2.0
     slip = costs["slippage_bps"] * 1e-4
     checked = 0
@@ -88,7 +88,7 @@ def test_same_bar_fill_lag_rejected(conn):
     """signal_to_fill_lag_days < 1 must raise: it would peek at the signal bar."""
     _seed(conn)
     uni = _universe()
-    bt_cfg = dict(cfg.load_backtest_config())
+    bt_cfg = bt_config_no_gate()
     bt_cfg["execution"] = {"signal_to_fill_lag_days": 0}
     strat = cfg.load_strategy("trend_momentum")
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
@@ -125,7 +125,7 @@ def test_missing_fill_bar_is_audited_not_silent(conn):
            "instruments": [{"ticker": "hole", "sector": "x"},
                            {"ticker": "filler", "sector": "y"}]}
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
-    bt_cfg = dict(cfg.load_backtest_config())
+    bt_cfg = bt_config_no_gate()
     res = engine.run_backtest(instruments, bench, _always_enter_strategy(), bt_cfg)
 
     lapsed = [a for a in res.fill_anomalies if a["type"] == "order_lapsed_no_bar"]
@@ -150,7 +150,7 @@ def test_nan_open_falls_back_to_close_with_audit(conn):
            "instruments": [{"ticker": "nanopen", "sector": "x"}]}
     instruments, bench = engine.load_instruments(conn, uni, "wig20tr")
     res = engine.run_backtest(instruments, bench, _always_enter_strategy(),
-                              cfg.load_backtest_config())
+                              bt_config_no_gate())
 
     fallbacks = [a for a in res.fill_anomalies
                  if a["type"] == "open_missing_close_reference"]

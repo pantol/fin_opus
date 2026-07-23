@@ -9,7 +9,8 @@
 
 name: trend_momentum_llm
 version: 1
-universe: wig20
+# The tradable universe is configured in backtest.yaml (universe.mode +
+# liquidity gate + optional index membership), not per strategy.
 
 # Entry: baseline trend+momentum AND a non-negative LLM score.
 entry:

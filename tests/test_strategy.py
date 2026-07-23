@@ -53,3 +53,32 @@ def test_deterministic_same_input_same_output():
     ctx = EvalContext(in_position=False)
     results = {evaluate(_strat(), feats, ctx) for _ in range(20)}
     assert results == {Signal.ENTER}
+
+
+def test_strip_llm_conditions_drops_only_llm_features():
+    from app.strategy.engine import strip_llm_conditions
+
+    cfg = {
+        "name": "x", "version": 1,
+        "entry": {"all": [
+            {"feature": "close_vs_sma200", "op": "gt", "value": 0.0},
+            {"feature": "momentum_6m", "op": "gt", "value": 0.0},
+            {"feature": "llm_score", "op": "gte", "value": 0.0},
+        ]},
+        "exit": {"any": [{"feature": "close_vs_sma200", "op": "lt", "value": 0.0}]},
+    }
+    stripped = strip_llm_conditions(cfg)
+    assert [c["feature"] for c in stripped["entry"]["all"]] == [
+        "close_vs_sma200", "momentum_6m"]
+    # exit rules and the original config stay untouched
+    assert stripped["exit"] == cfg["exit"]
+    assert len(cfg["entry"]["all"]) == 3
+
+
+def test_strip_llm_conditions_refuses_vacuous_entry():
+    from app.strategy.engine import strip_llm_conditions
+
+    only_llm = {"entry": {"all": [{"feature": "llm_score", "op": "gte", "value": 0.0}]}}
+    assert strip_llm_conditions(only_llm) is None   # empty all([]) would pass vacuously
+    assert strip_llm_conditions({}) is None
+    assert strip_llm_conditions({"entry": {"weird": []}}) is None

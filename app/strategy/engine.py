@@ -104,3 +104,25 @@ def evaluate(config: dict, features: dict, ctx: EvalContext) -> Signal:
     if entry_clause and _eval_clause(entry_clause, features, ctx):
         return Signal.ENTER
     return Signal.HOLD
+
+
+def strip_llm_conditions(config: dict) -> dict | None:
+    """Copy of `config` whose entry clause drops every `llm_*` feature condition.
+
+    Display-layer helper (LLM radar): re-evaluating a flat candidate against
+    the stripped rules tells whether the LLM condition alone flipped its entry.
+    Returns None when there is no entry clause or stripping would leave it
+    empty — an empty all/any clause would pass vacuously, and the radar must
+    never "guess" that a name was LLM-blocked.
+    """
+    entry = config.get("entry")
+    if not isinstance(entry, dict):
+        return None
+    key = "all" if "all" in entry else "any" if "any" in entry else None
+    if key is None:
+        return None
+    kept = [c for c in entry[key]
+            if not str(c.get("feature", "")).startswith("llm_")]
+    if not kept:
+        return None
+    return {**config, "entry": {key: kept}}

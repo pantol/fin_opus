@@ -92,9 +92,43 @@ PKO+PEO+ALR → SPL sized to zero); the LLM book commits ≈ 50.1 k and
 keeps **~50% cash**, because text vetoed two momentum leaders and the
 rest of the market has no scores yet.
 
-**Cards captured (LLM book, 4):** 3× 📌 KUP (PKO 160, PEO 68, OPL 1180)
-+ 📊 portfolio summary — see the
+**Cards captured (LLM book, 5):** 3× 📌 KUP (PKO 160, PEO 68, OPL 1180 —
+each carrying its `Werdykt LLM` line), the new 🧠 **Radar LLM** card and the
+📊 summary with the candidate funnel — see the
 [Telegram mockup](fresh-start-full-llm-2026-07-23-telegram-mockup.html).
+
+## Alert layer upgrade (same evening, after review)
+
+The first pass of this simulation produced bare cards (`KUP PKO, 160 szt.,
+stop…`) while all the reasoning — LLM verdicts, vetoes, the candidate
+funnel — lived only in the DB and this report. Review feedback: *the
+response should carry that information.* Cards now do:
+
+```text
+📌 Sygnal GPW (paper)
+Akcja: KUP PKO
+…
+Werdykt LLM: +0.40 (pozytywny)
+
+🧠 Radar LLM (paper, informacyjnie)
+Sesja: 2026-07-23
+Weta wejsc (score < 0): PKN -0.65, ALR -0.70, SPL -0.60
+Dopuszczone wejscia (score >= 0): PKO +0.40, PEO +0.00, OPL +0.60
+Kandydaci bez werdyktu: 46 (wejscie zamkniete do czasu analizy)
+LLM tylko filtruje wejscia — sizing, stopy i wyjscia pozostaja deterministyczne.
+
+📊 Portfel GPW (paper)
+…
+Kandydaci do wejscia: 113 • nowe sygnaly: 3
+```
+
+The radar is display-layer telemetry computed AFTER the deterministic
+decide (`strip_llm_conditions()` re-checks which flat candidates only the
+`llm_*` condition kept out); money logic is untouched. The numbers
+reconcile with the offline longlist: 113 flat names reached rule
+evaluation, 52 passed the baseline rules — 3 permitted + 3 vetoed
+(PKN/ALR/**SPL** — in this book SPL is stopped by the LLM, not the
+banking cap) + 46 without a verdict.
 
 ## Observations
 

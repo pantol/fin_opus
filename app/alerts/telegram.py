@@ -9,6 +9,7 @@ This is an OUTPUT-only notifier; it is NOT part of the money/decision path.
 """
 from __future__ import annotations
 
+import json
 import os
 
 import requests
@@ -75,6 +76,32 @@ _LAPSE_PL = {
 }
 
 
+def _llm_verdict_pl(score: float) -> str:
+    if score > 0:
+        return "pozytywny"
+    if score < 0:
+        return "negatywny"
+    return "neutralny"
+
+
+def _order_llm_score(order: dict) -> float | None:
+    """llm_score from the order's decision-time feature snapshot, if any.
+
+    Accepts both the DB row shape (features_json TEXT) and an already-parsed
+    dict; anything malformed reads as "no verdict" (display must never raise).
+    """
+    feats = order.get("features_json") or order.get("features")
+    if isinstance(feats, str):
+        try:
+            feats = json.loads(feats)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(feats, dict):
+        return None
+    score = feats.get("llm_score")
+    return float(score) if isinstance(score, (int, float)) else None
+
+
 def format_order_signal_pl(order: dict) -> str:
     """New signal card: the order is PENDING until the next session's open."""
     side = _SIDE_PL.get(order.get("side", ""), order.get("side", "?"))
@@ -86,7 +113,33 @@ def format_order_signal_pl(order: dict) -> str:
     ]
     if order.get("stop_price") is not None:
         lines.append(f"Stop: {float(order['stop_price']):.2f} PLN")
+    llm_score = _order_llm_score(order)
+    if llm_score is not None and order.get("side") == "BUY":
+        lines.append(f"Werdykt LLM: {llm_score:+.2f} ({_llm_verdict_pl(llm_score)})")
     lines.append("Realizacja: otwarcie nastepnej sesji (potwierdzenie jutro)")
+    return "\n".join(lines)
+
+
+def format_llm_radar_pl(*, date: str, permits: list, vetoes: list,
+                        no_score: int) -> str:
+    """Informational card: how the LLM gate shaped TODAY's entry candidates.
+
+    Output-only — by the time this renders, the deterministic decide already
+    happened; the LLM never sizes, never sets stops, never moves money.
+    """
+    lines = ["🧠 Radar LLM (paper, informacyjnie)", f"Sesja: {date}"]
+    if vetoes:
+        lines.append("Weta wejsc (score < 0): " + ", ".join(
+            f"{t.upper()} {s:+.2f}" for t, s in vetoes))
+    if permits:
+        lines.append("Dopuszczone wejscia (score >= 0): " + ", ".join(
+            f"{t.upper()} {s:+.2f}" if s is not None else t.upper()
+            for t, s in permits))
+    if no_score:
+        lines.append(f"Kandydaci bez werdyktu: {no_score} "
+                     "(wejscie zamkniete do czasu analizy)")
+    lines.append("LLM tylko filtruje wejscia — sizing, stopy i wyjscia "
+                 "pozostaja deterministyczne.")
     return "\n".join(lines)
 
 
@@ -137,10 +190,16 @@ def format_intraday_warning_pl(w: dict) -> str:
 
 
 def format_paper_summary_pl(*, date: str, equity: float, cash: float,
-                            n_open: int) -> str:
-    return "\n".join([
+                            n_open: int, n_candidates: int | None = None,
+                            n_new_signals: int | None = None) -> str:
+    lines = [
         "📊 Portfel GPW (paper)",
         f"Sesja: {date}",
         f"Kapital: {equity:,.2f} PLN (gotowka: {cash:,.2f} PLN)",
         f"Otwarte pozycje: {n_open}",
-    ])
+    ]
+    if n_candidates is not None:
+        lines.append(f"Kandydaci do wejscia: {n_candidates}"
+                     + (f" • nowe sygnaly: {n_new_signals}"
+                        if n_new_signals is not None else ""))
+    return "\n".join(lines)

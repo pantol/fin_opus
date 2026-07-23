@@ -31,7 +31,7 @@ from app.ingestion import provenance
 from app.logging import decisions as declog
 from app.paper import store
 from app.risk import manager as risk
-from app.strategy.engine import EvalContext, Signal, evaluate
+from app.strategy.engine import EvalContext, Signal, evaluate, strip_llm_conditions
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -49,6 +49,11 @@ class SessionResult:
     equity: float = 0.0
     cash: float = 0.0
     n_open: int = 0
+    # Display-layer telemetry (cards/report only — never feeds decisions):
+    # flat names that reached rule evaluation after the alive/membership/
+    # liquidity gates, and how the llm_score condition shaped them.
+    n_entry_candidates: int = 0
+    llm_radar: dict | None = None   # {permits: [(tk, score)], vetoes: [...], no_score: int}
 
 
 @dataclass
@@ -80,6 +85,13 @@ class PaperRunReport:
                              f"(fills next session open)")
             for a in s.anomalies:
                 lines.append(f"    anomaly {a['type']}: {a['side']} {a['ticker']}")
+            if s.n_entry_candidates:
+                lines.append(f"    candidates: {s.n_entry_candidates} entry-eligible")
+            if s.llm_radar is not None:
+                r = s.llm_radar
+                lines.append(
+                    f"    llm-radar: {len(r['permits'])} permitted, "
+                    f"{len(r['vetoes'])} vetoed, {r['no_score']} without verdict")
         for w in self.warnings:
             lines.append(f"  WARNING: {w}")
         return "\n".join(lines)
@@ -547,6 +559,13 @@ def _process_session(
     # --- 3. decide on today's close; orders fill at the NEXT session's open ---
     # Mirrors the engine's step-3 loop exactly (fast views + entry gate) so
     # paper decisions stay byte-compatible with backtest decisions.
+    # The llm-radar bookkeeping below is OUTPUT-only telemetry: it re-reads
+    # the same snapshots after the signal is already decided.
+    uses_llm = engine.strategy_uses_llm_features(strategy_cfg)
+    stripped_cfg = strip_llm_conditions(strategy_cfg) if uses_llm else None
+    llm_permits: list[tuple] = []
+    llm_vetoes: list[tuple] = []
+    llm_no_score = 0
     day_ns = int(day.value)
     for inst in instruments:
         if not engine._alive(inst, day):
@@ -586,6 +605,22 @@ def _process_session(
         )
         sig = evaluate(strategy_cfg, snap, ctx)
 
+        is_flat_candidate = (not in_pos and not has_pending_buy
+                             and not has_pending_sell)
+        if is_flat_candidate:
+            session.n_entry_candidates += 1
+            if uses_llm:
+                score = snap.get("llm_score")
+                if sig == Signal.ENTER:
+                    llm_permits.append((inst.ticker, score))
+                elif (stripped_cfg is not None
+                        and evaluate(stripped_cfg, snap, ctx) == Signal.ENTER):
+                    # Only the llm_* condition(s) kept this name out.
+                    if score is None:
+                        llm_no_score += 1
+                    else:
+                        llm_vetoes.append((inst.ticker, score))
+
         if sig == Signal.ENTER and not in_pos and not has_pending_buy:
             atr_val = snap.get("atr")
             if not atr_val:
@@ -624,6 +659,9 @@ def _process_session(
     session.equity = equity
     session.cash = cash
     session.n_open = len(positions)
+    if uses_llm:
+        session.llm_radar = {"permits": llm_permits, "vetoes": llm_vetoes,
+                             "no_score": llm_no_score}
     return cash, peak_equity, session
 
 
@@ -699,9 +737,16 @@ def _flush_alerts(conn, user_id: str, send_fn, report: PaperRunReport) -> None:
                 undelivered += 1
         if report.sessions:
             last = report.sessions[-1]
+            r = last.llm_radar
+            if r and (r["permits"] or r["vetoes"] or r["no_score"]):
+                # Best-effort like the summary: informational, not queued.
+                send_fn(telegram.format_llm_radar_pl(
+                    date=last.date, permits=r["permits"], vetoes=r["vetoes"],
+                    no_score=r["no_score"]))
             send_fn(telegram.format_paper_summary_pl(
                 date=last.date, equity=last.equity, cash=last.cash,
-                n_open=last.n_open))
+                n_open=last.n_open, n_candidates=last.n_entry_candidates,
+                n_new_signals=len(last.new_orders)))
     except Exception as exc:  # noqa: BLE001 — alerting must never break the loop
         report.warnings.append(f"alert delivery failed (will retry next run): {exc}")
     if undelivered:

@@ -39,3 +39,53 @@ def test_telegram_dry_run_without_token(capsys):
     out = capsys.readouterr().out
     assert "Sygnal GPW" in out          # Polish end-user string
     assert "WEJSCIE" in out
+
+
+def test_signal_card_shows_llm_verdict_for_buy():
+    order = {"side": "BUY", "ticker": "pko", "qty": 160,
+             "decision_date": "2026-07-23", "stop_price": 100.99,
+             "features_json": json.dumps({"close": 107.22, "llm_score": 0.4})}
+    card = telegram.format_order_signal_pl(order)
+    assert "Werdykt LLM: +0.40 (pozytywny)" in card
+
+    order["features_json"] = json.dumps({"close": 107.22, "llm_score": 0.0})
+    assert "Werdykt LLM: +0.00 (neutralny)" in telegram.format_order_signal_pl(order)
+
+    # No llm_score in the snapshot (baseline strategy) -> no LLM line at all.
+    order["features_json"] = json.dumps({"close": 107.22})
+    assert "Werdykt LLM" not in telegram.format_order_signal_pl(order)
+
+    # Malformed snapshot must never break the card (display-only path).
+    order["features_json"] = "{not json"
+    assert "Sygnal GPW" in telegram.format_order_signal_pl(order)
+
+
+def test_llm_radar_card_lists_vetoes_permits_and_no_score():
+    card = telegram.format_llm_radar_pl(
+        date="2026-07-23",
+        permits=[("pko", 0.4), ("peo", 0.0)],
+        vetoes=[("pkn", -0.65), ("alr", -0.7)],
+        no_score=47,
+    )
+    assert "Radar LLM" in card
+    assert "Weta wejsc (score < 0): PKN -0.65, ALR -0.70" in card
+    assert "Dopuszczone wejscia (score >= 0): PKO +0.40, PEO +0.00" in card
+    assert "Kandydaci bez werdyktu: 47" in card
+    assert "deterministyczne" in card  # the input-only disclaimer stays
+
+    # Empty sections are omitted, the disclaimer is not.
+    short = telegram.format_llm_radar_pl(date="2026-07-23", permits=[],
+                                         vetoes=[("pkn", -0.65)], no_score=0)
+    assert "Dopuszczone" not in short and "bez werdyktu" not in short
+    assert "PKN -0.65" in short
+
+
+def test_summary_card_funnel_line_is_optional():
+    with_funnel = telegram.format_paper_summary_pl(
+        date="2026-07-23", equity=100000.0, cash=100000.0, n_open=0,
+        n_candidates=52, n_new_signals=3)
+    assert "Kandydaci do wejscia: 52 • nowe sygnaly: 3" in with_funnel
+
+    legacy = telegram.format_paper_summary_pl(
+        date="2026-07-23", equity=100000.0, cash=100000.0, n_open=0)
+    assert "Kandydaci" not in legacy

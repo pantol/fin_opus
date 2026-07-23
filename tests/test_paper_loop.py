@@ -416,3 +416,72 @@ def test_lag_other_than_one_is_refused(conn):
     bt["execution"] = {"signal_to_fill_lag_days": 2}
     code, rep = _run(conn, calendar=calendar, bt_cfg=bt)
     assert code == 2 and "not supported live" in rep.reason
+
+
+def _llm_strategy():
+    s = _strategy()
+    s["name"] = "paper_toy_llm"
+    s["entry"]["all"].append({"feature": "llm_score", "op": "gte", "value": 0.0})
+    return s
+
+
+def _seed_llm_feature(conn, ticker, as_of, score):
+    iid = conn.execute("SELECT id FROM instruments WHERE ticker=?",
+                       (ticker,)).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO llm_features (instrument_id, as_of_date, llm_score, created_at)"
+        " VALUES (?, ?, ?, ?)", (iid, as_of, score, "2026-01-01T00:00:00+00:00"))
+    conn.commit()
+
+
+def test_llm_gate_radar_vetoes_and_no_score(conn):
+    calendar = _seed(conn)
+    day_iso = calendar[-1].date().isoformat()
+    _seed_llm_feature(conn, "aaa", day_iso, -0.65)   # bearish -> veto
+    # bbb has NO llm_features row -> fails closed, counted as "without verdict"
+
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent,
+                     strategy_cfg=_llm_strategy())
+    assert code == 0 and rep.status == "ok"
+    s = rep.sessions[-1]
+    assert s.new_orders == []                        # both entries blocked
+    assert s.n_entry_candidates == 2
+    assert s.llm_radar == {"permits": [], "vetoes": [("aaa", -0.65)],
+                           "no_score": 1}
+    # Cards: no signals, but the radar card + summary still go out.
+    radar = [c for c in sent if "Radar LLM" in c]
+    assert len(radar) == 1
+    assert "AAA -0.65" in radar[0] and "bez werdyktu: 1" in radar[0]
+    assert any("Kandydaci do wejscia: 2 • nowe sygnaly: 0" in c for c in sent)
+
+
+def test_llm_gate_permit_puts_verdict_on_signal_card(conn):
+    calendar = _seed(conn)
+    day_iso = calendar[-1].date().isoformat()
+    _seed_llm_feature(conn, "aaa", day_iso, 0.6)     # bullish -> enter
+    _seed_llm_feature(conn, "bbb", day_iso, -0.4)    # bearish -> veto
+
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent,
+                     strategy_cfg=_llm_strategy())
+    assert code == 0
+    s = rep.sessions[-1]
+    assert [o["ticker"] for o in s.new_orders] == ["aaa"]
+    assert s.llm_radar == {"permits": [("aaa", 0.6)],
+                           "vetoes": [("bbb", -0.4)], "no_score": 0}
+    signal_cards = [c for c in sent if "Sygnal GPW" in c]
+    assert len(signal_cards) == 1
+    assert "Werdykt LLM: +0.60 (pozytywny)" in signal_cards[0]
+
+
+def test_baseline_strategy_emits_no_radar_and_no_verdict_line(conn):
+    calendar = _seed(conn)
+    sent = []
+    code, rep = _run(conn, calendar=calendar, sent=sent)
+    assert code == 0
+    assert rep.sessions[-1].llm_radar is None
+    assert not any("Radar LLM" in c for c in sent)
+    assert not any("Werdykt LLM" in c for c in sent)
+    # Funnel still reported for the baseline book.
+    assert any("Kandydaci do wejscia: 2 • nowe sygnaly: 2" in c for c in sent)

@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 340 passing.
+ZERO LLM in the money path. **Tests:** 348 passing.
 
 ---
 
@@ -89,6 +89,27 @@ ZERO LLM in the money path. **Tests:** 340 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-23 (evening) — Fresh-start v2 sim (full market + LLM) + explainable alert cards
+- **Fresh-start v2 simulation** (`docs/simulations/fresh-start-full-llm-2026-07-23.md`
+  + Telegram mockup): first run of the whole collect → LLM → decide chain on
+  the 2026-07-23 close, full-market universe. Fresh 100k `trend_momentum_llm`
+  book vs a baseline control in twin sandboxes (`data/sandbox-full-llm.db`,
+  `data/sandbox-full-base.db`): the LLM gate vetoed KUP PKN (−0.65, 1.9 bn PLN
+  impairment filing) and KUP ALR (−0.70, CJEU −96.5 mln), permitted
+  PKO/PEO/OPL, failed closed on 46 scoreless wide-market rule-passers
+  (Digitanet/AB PL/ACTION entered the control only). Real book + day-series
+  sandbox untouched; ZERO LLM calls in the decide path.
+- **Explainable alert cards** (user review feedback: the bot's cards carried
+  none of the "why"): BUY signal cards now show `Werdykt LLM: +0.40
+  (pozytywny)` from the order's decision-time snapshot; a new informational
+  **🧠 Radar LLM** card lists vetoed/permitted/scoreless entry candidates per
+  session; the portfolio summary gains a `Kandydaci do wejscia: 113 • nowe
+  sygnaly: 3` funnel line. `strip_llm_conditions()` (strategy engine) tells
+  which flat candidates only the llm_* condition kept out — display-layer
+  telemetry computed AFTER the deterministic decide; sizing/stops/exits
+  untouched. Tests: **348 passing** (8 new: card formats, strip helper,
+  radar integration, baseline unchanged).
 
 ### 2026-07-23 — Full-market tradable universe (whole GPW main market)
 - **`universe.mode: full`** (backtest.yaml, now the default): the tradable

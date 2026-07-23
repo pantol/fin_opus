@@ -16,6 +16,15 @@ Config grammar (see config/strategies/*.yaml):
     {feature: <name>, op: gt|lt|gte|lte|eq, value: <number>}
 or an exit-only special:
     {type: atr_stop, atr_mult: <number>}   # handled by risk/backtest, see notes
+
+Optional cross-sectional ordering of same-day entry candidates:
+    entry_ranking:
+      - {feature: <name>, order: desc|asc}   # order defaults to desc
+Keys apply lexicographically; per key, candidates missing the feature sort
+AFTER those that have it; remaining ties keep instrument order (stable sort).
+Absent/empty -> legacy behavior (instrument id order). Entries only; exits are
+never ranked. Ranking reads the same pre-materialized feature snapshot the
+rules read -- never a model, never money.
 """
 from __future__ import annotations
 
@@ -104,6 +113,57 @@ def evaluate(config: dict, features: dict, ctx: EvalContext) -> Signal:
     if entry_clause and _eval_clause(entry_clause, features, ctx):
         return Signal.ENTER
     return Signal.HOLD
+
+
+_RANK_ORDERS = ("desc", "asc")
+
+
+def entry_ranking_spec(config: dict) -> list[tuple[str, bool]]:
+    """Parsed, validated `entry_ranking` -> [(feature, descending), ...].
+
+    Absent or empty config yields [] (legacy instrument-id order). Malformed
+    config raises immediately — a typo must fail the run at load, never
+    silently reorder the book.
+    """
+    raw = config.get("entry_ranking")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("entry_ranking must be a list of {feature, order} items")
+    spec: list[tuple[str, bool]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("feature"), str):
+            raise ValueError(
+                f"entry_ranking items need a string 'feature': {item!r}")
+        order = str(item.get("order", "desc")).lower()
+        if order not in _RANK_ORDERS:
+            raise ValueError(
+                f"entry_ranking order must be one of {_RANK_ORDERS}, got {order!r}")
+        spec.append((item["feature"], order == "desc"))
+    return spec
+
+
+def entry_rank_key(spec: list[tuple[str, bool]], features: dict) -> tuple:
+    """Deterministic sort key for one entry candidate's feature snapshot.
+
+    Per ranking key, a candidate whose feature is missing (absent, None,
+    non-numeric or NaN) sorts AFTER every candidate that has a value — a name
+    without an LLM verdict must never outrank a scored one, and a typo'd
+    feature name degrades to a no-op key instead of crashing the loop. Callers
+    sort with Python's stable sort, so full ties keep instrument order.
+    """
+    key = []
+    for feature, descending in spec:
+        val = features.get(feature)
+        try:
+            num = float(val)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            num = None
+        if num is None or num != num:  # None or NaN -> missing
+            key.append((1, 0.0))
+        else:
+            key.append((0, -num if descending else num))
+    return tuple(key)
 
 
 def strip_llm_conditions(config: dict) -> dict | None:

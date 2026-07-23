@@ -13,6 +13,7 @@ from app.config import load_llm_config
 from app.db import connect, init_db
 from app.ingestion import filings_db
 from app.llm import pipeline
+from app.llm import synthesis as synthesis_mod
 from app.llm.client import LLMClient
 
 
@@ -22,7 +23,9 @@ def _client(conn, research_content, synthesis_content):
 
     def transport(url, headers, body, timeout):
         model = body["model"]
-        is_synth = model == cfg["synthesis"]["model"]
+        # Roles may share one model (e.g. flash for both) — discriminate by the
+        # system prompt, which always differs between research and synthesis.
+        is_synth = body["messages"][0].get("content") == synthesis_mod._SYSTEM
         content = synthesis_content if is_synth else research_content
         return {
             "id": "gen",

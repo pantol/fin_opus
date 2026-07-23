@@ -8,24 +8,34 @@
 base_url: https://openrouter.ai/api/v1
 
 # Cheap extraction / research agent (reads filing text -> structured JSON).
+# DeepSeek V4 Flash, pinned to Novita (fp8, 99.3%+ uptime, $0.14/$0.28 per 1M).
+# Pin notes (verified live 2026-07-23): the first-party DeepSeek endpoint is
+# LISTED by the endpoints API but returns 404 "No endpoints found" on chat
+# completions; the sub-$0.10 tier (Baidu et al.) sits on a congested shared
+# pool (429 tpm_rate_limit_exceeded at test time).
+# V4 Flash REASONS BY DEFAULT: thinking tokens bill as completion tokens and
+# precede the JSON — max_tokens 2000 is headroom so the verdict does not
+# truncate mid-thought (a 20-token test returned content:null, all reasoning).
 extraction:
-  model: openai/gpt-4o-mini
+  model: deepseek/deepseek-v4-flash
   provider:
-    order: [OpenAI]
+    order: [Novita]
     allow_fallbacks: false
   temperature: 0.0
-  max_tokens: 800
+  max_tokens: 2000
 
-# Pricier synthesis / judge (research + quant + fundamentals -> verdict JSON).
-# GLM 5.2 is a REASONING model: its thinking tokens bill as completion tokens,
-# so max_tokens needs headroom well beyond the verdict JSON itself — too low
-# and the answer truncates mid-thought and schema validation rejects it.
-# Pinned to first-party z-ai: fp8 serve (cheaper hosts are fp4-quantized or on
-# promo pricing that would drift from the ledger prices below).
+# Synthesis / judge (research + quant + fundamentals -> verdict JSON).
+# Same DeepSeek V4 Flash as extraction (user decision 2026-07-23: flash for
+# both roles) — NOTE: this abandons the cheap-extraction/pricier-judge cost
+# routing; the quality evidence must come from the golden set (make eval-llm)
+# once eval_labels exist. V4 Flash REASONS BY DEFAULT: thinking tokens bill
+# as completion tokens, so max_tokens needs headroom well beyond the verdict
+# JSON itself — too low and the answer truncates mid-thought and schema
+# validation rejects it.
 synthesis:
-  model: z-ai/glm-5.2
+  model: deepseek/deepseek-v4-flash
   provider:
-    order: [z-ai]
+    order: [Novita]
     allow_fallbacks: false
   temperature: 0.1
   max_tokens: 3000
@@ -41,8 +51,7 @@ request_timeout_seconds: 60
 # Required whenever budget.monthly_usd_cap is set: without a price, cost
 # tracking would undercount and the cap would never trigger.
 prices:
-  openai/gpt-4o-mini: {input_per_1m: 0.15, output_per_1m: 0.60}
-  z-ai/glm-5.2: {input_per_1m: 1.40, output_per_1m: 4.40}
+  deepseek/deepseek-v4-flash: {input_per_1m: 0.14, output_per_1m: 0.28}
 
 # Monthly HARD cap on LLM spend (USD, calendar month, UTC). When reached, live
 # LLM calls stop (cache hits still work — they are free), the pipeline records

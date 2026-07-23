@@ -94,7 +94,9 @@ def test_pipeline_materializes_relevance_column(conn):
     cfg = load_llm_config()
 
     def content_fn(body):
-        if body["model"] == cfg["synthesis"]["model"]:
+        # Roles may share one model — discriminate by the system prompt instead.
+        from app.llm import synthesis as synthesis_mod
+        if body["messages"][0].get("content") == synthesis_mod._SYSTEM:
             return json.dumps({"verdict": "bullish", "conviction": 0.8, "rationale": "ok"})
         return json.dumps(_research_payload(relevance="relevant_uninteresting"))
 
@@ -230,11 +232,13 @@ def test_previous_run_catches_model_only_change(conn):
 
 def _pinned_prices():
     """Test-owned price table for whatever models config/llm.yaml currently
-    names — cost math must not silently change when ops retunes the config."""
+    names — cost math must not silently change when ops retunes the config.
+    Roles may share one model; on that collision the extraction price wins
+    (dict order below), keeping the cost-math assertions meaningful."""
     cfg = load_llm_config()
     return {"prices": {
-        cfg["extraction"]["model"]: {"input_per_1m": 0.15, "output_per_1m": 0.60},
         cfg["synthesis"]["model"]: {"input_per_1m": 1.40, "output_per_1m": 4.40},
+        cfg["extraction"]["model"]: {"input_per_1m": 0.15, "output_per_1m": 0.60},
     }}
 
 

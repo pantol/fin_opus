@@ -443,6 +443,9 @@ state. Cron example (Warsaw): `30 19 * * 1-5  cd /opt/fin_opus && make signals`.
 
 ## Project structure
 
+Visual map of the whole repo — architecture + daily-cycle Mermaid diagrams, DB
+tables, command reference (in Polish): [docs/mapa-repozytorium.md](docs/mapa-repozytorium.md).
+
 ```
 app/
   config.py             # YAML + path loading

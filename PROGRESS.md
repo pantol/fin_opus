@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 308 passing.
+ZERO LLM in the money path. **Tests:** 320 passing.
 
 ---
 
@@ -89,6 +89,24 @@ ZERO LLM in the money path. **Tests:** 308 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-23 — Day-6/7 simulation (sessions 2026-07-21/22) + sandbox persistence
+- Sandbox rebuilt: the original day-1…5 sandbox lived in /tmp and was lost;
+  reconstructed by deterministic replay of sessions 2026-07-13→20 on a fresh
+  DB copy — **byte-parity with the documented day-5 book** (equity 97,731.10,
+  cash 23,975.68, all stops and pending orders), proving the loop's
+  replayability. Sandbox now persists at `data/sandbox.db` (gitignored).
+- **Day 6 (07-21):** Monday's re-entries filled at the open — PEO 67 @ 234.57,
+  ALR 27 @ 138.23; whipsaw round-trip priced at +2.2%/+3.9% over Monday's
+  exits. Zero new signals; equity 99,208.72 (+1.51% vs WIG20TR +1.78%);
+  −0.79% since inception vs +0.85%.
+- **Day 7 (07-22):** second zero-activity evening; equity 99,556.10 (+0.35%
+  vs +0.60%); −0.44% vs +1.46% since inception. First locked-in profit:
+  PKN trailing stop 144.51 crossed above its 144.29 entry.
+- Simulation cards now captured via injected `send_fn` (NOT the CLI) because
+  `.env` carries live Telegram credentials — a CLI sandbox run would fire
+  real messages. Reports: `docs/simulations/day-06-2026-07-21.md`,
+  `day-07-2026-07-22.md` (+ mockup HTMLs). Real track record still unstarted.
 
 ### 2026-07-20 (evening) — Day-5 simulation: settlement day (session 2026-07-20)
 - First evening run executed in the production cron's real time slot.

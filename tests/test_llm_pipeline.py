@@ -179,6 +179,64 @@ def test_pipeline_retires_permanently_malformed_filing_after_max_attempts():
     assert conn.execute("SELECT COUNT(*) FROM llm_features").fetchone()[0] == 0
 
 
+def test_prompt_identity_names_archive_instruments():
+    # Curated ticker unchanged — its existing llm_cache entries stay valid.
+    assert pipeline.prompt_identity("pko", "PKO BP", "PLPKO0000016") == "pko"
+    # Archive-discovered: ticker IS the lowercase ISIN -> human-readable identity.
+    assert (pipeline.prompt_identity("plgpw0000017", "GPW", "PLGPW0000017")
+            == "GPW (PLGPW0000017)")
+    # Missing name or ISIN -> fall back to the ticker (never guess).
+    assert (pipeline.prompt_identity("plgpw0000017", None, "PLGPW0000017")
+            == "plgpw0000017")
+    assert pipeline.prompt_identity("abc", "ABC", None) == "abc"
+
+
+def _add_instrument(conn, ticker, name, isin=None, is_index=0):
+    return int(conn.execute(
+        "INSERT INTO instruments (ticker, name, isin, is_index) VALUES (?,?,?,?)",
+        (ticker, name, isin, is_index),
+    ).lastrowid)
+
+
+def _add_filing(conn, iid, published_at, dedup, attempts=0, processed=0):
+    conn.execute(
+        "INSERT INTO filings (source, title, published_at, fetched_at, full_text,"
+        " content_hash, dedup_key, instrument_id, processed, attempts)"
+        " VALUES ('test','t',?,?,'x',?,?,?,?,?)",
+        (published_at, published_at, dedup, dedup, iid, processed, attempts),
+    )
+    conn.commit()
+
+
+def test_discover_unprocessed_instruments_is_db_driven_and_point_in_time():
+    """Targets come from filings in the DB (ISIN-resolved), not universe.yaml:
+    point-in-time cutoff, processed/attempts filters, deterministic oldest-first
+    order, and unmappable filings counted rather than silently dropped."""
+    conn = connect(":memory:")
+    init_db(conn)
+    pko = _add_instrument(conn, "pko", "PKO", "PLPKO0000016")
+    gpw = _add_instrument(conn, "plgpw0000017", "GPW", "PLGPW0000017")
+    xyz = _add_instrument(conn, "plxyz0000019", "XYZ", "PLXYZ0000019")
+    idx = _add_instrument(conn, "wig20tr", "WIG20TR", None, is_index=1)
+
+    _add_filing(conn, gpw, "2024-05-01T09:00:00+02:00", "g1")  # oldest backlog
+    _add_filing(conn, pko, "2024-05-01T10:00:00+02:00", "p1")
+    _add_filing(conn, pko, "2024-05-02T08:00:00+02:00", "p2")
+    _add_filing(conn, xyz, "2024-06-10T09:00:00+02:00", "x-future")  # beyond T
+    _add_filing(conn, xyz, "2024-05-01T09:30:00+02:00", "x-exhausted",
+                attempts=pipeline.MAX_ATTEMPTS)  # retries burned -> excluded
+    _add_filing(conn, gpw, "2024-04-01T09:00:00+02:00", "g-done", processed=1)
+    _add_filing(conn, None, "2024-05-01T11:00:00+02:00", "orphan")  # no ISIN match
+    _add_filing(conn, idx, "2024-05-01T12:00:00+02:00", "on-index")
+
+    targets, n_unmapped = pipeline.discover_unprocessed_instruments(conn, "2024-05-02")
+    assert [t["ticker"] for t in targets] == ["plgpw0000017", "pko"]
+    assert targets[0]["name"] == "GPW" and targets[0]["isin"] == "PLGPW0000017"
+    assert targets[0]["n_filings"] == 1  # the processed g-done row is excluded
+    assert targets[1]["n_filings"] == 2
+    assert n_unmapped == 2  # the orphan + the index-mapped filing
+
+
 def test_pipeline_warsaw_boundary_early_morning_filing_counts_for_local_day():
     # A filing at 01:30 CEST on 2024-05-03 is 2024-05-02T23:30Z. With a Warsaw
     # local end-of-day cutoff it belongs to May 3 (its OWN local day), and must

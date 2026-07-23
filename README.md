@@ -316,15 +316,25 @@ the collector starts running, so keep it running continuously.
 ### 5. Materialize LLM features (Phase 2, needs `OPENROUTER_API_KEY`)
 
 ```bash
-make llm                                        # today's features for the whole universe
+make llm                                        # today's features (DB-driven targets)
 python -m app.cli llm --date 2026-07-01         # a specific decision date
-python -m app.cli llm --ticker pko              # a single instrument
+python -m app.cli llm --ticker pko              # one instrument (curated or ISIN ticker)
+python -m app.cli llm --max-new-instruments 25  # widen the per-run non-curated cap
 ```
 
 **Needs filings first (step 4).** On a fresh clone there are none — RSS has no
 backfill — so `make llm` and `make ab` produce nothing until the collector has
 run for a while. Run `make collect-loop` and let it accumulate history first;
 `make llm` says so when it finds an empty `filings` table.
+
+Targets are discovered from the DB, not the curated universe list: any
+instrument the collector resolved filings to by ISIN is eligible, including
+archive-discovered names whose ticker is the lowercase ISIN (their prompts
+identify the issuer as `NAME (ISIN)`). Instruments outside
+`config/universe.yaml` are capped at `--max-new-instruments` per run
+(default 10, oldest backlog first, the deferral is printed) so a filing
+backlog cannot cause a cost spike — deferred filings simply wait and keep
+point-in-time semantics (their feature gets the later run's `as_of_date`).
 
 For each instrument with unprocessed filings published up to the decision
 date (end-of-day Europe/Warsaw), the pipeline runs research → judge on the

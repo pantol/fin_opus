@@ -276,6 +276,15 @@ def cmd_llm(args) -> int:
     point-in-time feature panel) enter the prompt as context text only.
     The output is one llm_score per (instrument, as_of_date) in
     `llm_features`; the backtest later reads those rows with NO LLM call.
+
+    Targets are discovered from the DB — every instrument with unprocessed
+    filings published on or before T (the collector resolves filings by ISIN,
+    so archive-discovered names outside config/universe.yaml are covered too),
+    NOT from the curated universe list. Curated names always process;
+    non-curated ones are capped per run (--max-new-instruments) so a filing
+    backlog cannot cause a cost spike. Deferred filings stay unprocessed and a
+    later run picks them up — their feature then carries that later (still
+    point-in-time correct) as_of_date.
     """
     import os
     from datetime import datetime
@@ -298,13 +307,33 @@ def cmd_llm(args) -> int:
     client = LLMClient(conn, cfg.load_llm_config())
 
     as_of = args.date or datetime.now(ZoneInfo("Europe/Warsaw")).date().isoformat()
-    entries = universe.get("instruments", [])
+    curated = {e["ticker"].lower() for e in universe.get("instruments", [])}
+    targets, n_unmapped = llm_pipeline.discover_unprocessed_instruments(conn, as_of)
+
+    n_deferred = 0
     if args.ticker:
-        entries = [e for e in entries if e["ticker"].lower() == args.ticker.lower()]
-        if not entries:
-            print(f"Ticker '{args.ticker}' is not in the universe.")
+        wanted = args.ticker.lower()
+        if conn.execute("SELECT 1 FROM instruments WHERE ticker = ?",
+                        (wanted,)).fetchone() is None:
+            print(f"Ticker '{args.ticker}' is not ingested (no instruments row); "
+                  "run `make ingest` first.")
             conn.close()
             return 1
+        targets = [t for t in targets if t["ticker"] == wanted]
+    else:
+        # Backlog cost control: curated names always process; at most
+        # --max-new-instruments non-curated ones per run, oldest backlog first
+        # (discovery order is deterministic). The rest wait for the next run.
+        cap = max(0, int(args.max_new_instruments))
+        kept, n_new = [], 0
+        for t in targets:
+            if t["ticker"] in curated:
+                kept.append(t)
+            elif n_new < cap:
+                kept.append(t)
+                n_new += 1
+        n_deferred = len(targets) - len(kept)
+        targets = kept
 
     from datetime import timezone as _tz
 
@@ -313,18 +342,20 @@ def cmd_llm(args) -> int:
 
     print(f"Materializing LLM features as of {as_of} "
           f"(filings cutoff: end of day, Europe/Warsaw)...")
+    print(f"Targets (DB-driven): {len(targets)} instrument(s) with unprocessed "
+          f"filings.")
+    if n_deferred:
+        print(f"Capped: {n_deferred} non-curated instrument(s) deferred to a "
+              f"later run (--max-new-instruments {args.max_new_instruments}).")
+    if n_unmapped:
+        print(f"Note: {n_unmapped} unprocessed filing(s) have no scoreable "
+              f"instrument (unresolved ISIN/name) and were skipped.")
+
     n_features = n_nothing = 0
     degraded_reason = None
-    for entry in entries:
-        ticker = entry["ticker"].lower()
-        row = conn.execute(
-            "SELECT id FROM instruments WHERE ticker = ?", (ticker,)
-        ).fetchone()
-        if row is None:
-            print(f"  {ticker:10s} not ingested (run `make ingest` first) — skipped")
-            n_nothing += 1
-            continue
-        inst_id = int(row["id"])
+    for tgt in targets:
+        ticker = tgt["ticker"]
+        inst_id = tgt["instrument_id"]
 
         # Deterministic quant context (point-in-time; passed as text only).
         quant_score = None
@@ -336,20 +367,21 @@ def cmd_llm(args) -> int:
 
         try:
             verdict = llm_pipeline.compute_feature_for_date(
-                conn, client, instrument_id=inst_id, ticker=ticker,
+                conn, client, instrument_id=inst_id,
+                ticker=llm_pipeline.prompt_identity(ticker, tgt["name"], tgt["isin"]),
                 as_of_date=as_of, quant_score=quant_score,
             )
         except LLMBudgetExceededError as exc:
             # Budget, not a bad filing: nothing was marked processed or attempt-
             # bumped for the interrupted instrument — those filings simply wait.
             degraded_reason = str(exc)
-            print(f"  {ticker:10s} STOPPED: {exc}")
+            print(f"  {ticker:12s} STOPPED: {exc}")
             break
         if verdict is None:
-            n_nothing += 1  # no unprocessed filings, or rejected (logged)
+            n_nothing += 1  # every in-window filing rejected this run (logged)
         else:
             n_features += 1
-            print(f"  {ticker:10s} llm_score={verdict['llm_score']:+.3f} "
+            print(f"  {ticker:12s} llm_score={verdict['llm_score']:+.3f} "
                   f"({verdict['verdict']}, conviction={verdict['conviction']:.2f})")
 
     status = "degraded" if degraded_reason else "ok"
@@ -362,7 +394,8 @@ def cmd_llm(args) -> int:
     conn.commit()
 
     print(f"\nMaterialized {n_features} feature rows; "
-          f"{n_nothing} instruments had nothing to process.")
+          f"{n_nothing} targeted instruments yielded no feature "
+          f"(all their filings rejected — see logs).")
     if n_features == 0 and not degraded_reason:
         n_filings = conn.execute("SELECT COUNT(*) AS c FROM filings").fetchone()["c"]
         if n_filings == 0:
@@ -819,7 +852,13 @@ def main(argv=None) -> int:
     llm.add_argument("--date", default=None,
                      help="Decision date T (ISO; default: today in Europe/Warsaw)")
     llm.add_argument("--ticker", default=None,
-                     help="Restrict to one ticker (default: all universe instruments)")
+                     help="Restrict to one DB ticker — a curated name or the "
+                          "lowercase ISIN of an archive-discovered instrument "
+                          "(default: every instrument with unprocessed filings)")
+    llm.add_argument("--max-new-instruments", type=int, default=10,
+                     help="Per-run cap on instruments OUTSIDE config/universe.yaml "
+                          "(backlog cost control; deferred filings wait for the "
+                          "next run). Curated names are never capped. Default: 10")
     sub.add_parser("refdata",
                    help="Load index membership + corporate actions fixtures; derive adjusted prices")
     sub.add_parser("check-data",

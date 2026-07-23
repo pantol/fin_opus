@@ -52,18 +52,34 @@ feeds:
     type: null
     url: "https://biznes.pap.pl/rss"
 
-  # --- Optional extras (exchange-OPERATOR communiques, not company filings:
-  # suspensions, alert list, index notices). Disabled by default; enable if
-  # the strategy should react to trading suspensions. gpw.pl is WAF-sensitive
-  # (needs the browser-like headers the collector already sends) and has the
-  # same +0100 offset quirk.
+  # --- Exchange-OPERATOR communiques (not company filings: suspensions,
+  # alert list, index notices). ENABLED 2026-07-23 (user decision: official
+  # communiques belong in the store; both URLs re-verified live that day —
+  # HTTP 200, real RSS). Operator notices complement company ESPI: e.g. a
+  # suspension explains a missing fresh bar. gpw.pl is WAF-sensitive (needs
+  # the browser-like headers the collector already sends) and has the same
+  # +0100 offset quirk.
+  #
+  # NOTE on "official ESPI": the statutory company-filing wire is PAP —
+  # already covered above by pap_biznes (verified 2026-07-23: ~24/25 items in
+  # its window are numbered ESPI/EBI dispatches). espi.pap.pl and
+  # infostrefa.com expose NO public RSS (probed 2026-07-23: no response).
+  # PAP's RSS window is SHORT (~25 items / a few hours) -> completeness comes
+  # from poll cadence + the filings checks in `make check-data`, not from the
+  # feed itself.
+  # max_silence_business_hours: operator notices are sporadic (verified
+  # 2026-07-23: gpw feed's newest item was 15 days old while perfectly
+  # healthy) — override the strict company-wire default from
+  # data_quality.yaml so `make check-data` flags a dead feed, not a quiet one.
   - name: gpw_komunikaty
-    enabled: false
+    enabled: true
     type: null
     timezone_override: Europe/Warsaw
     url: "https://www.gpw.pl/rss_komunikaty"
+    max_silence_business_hours: 400
   - name: newconnect_komunikaty
-    enabled: false
+    enabled: true
     type: EBI
     timezone_override: Europe/Warsaw
     url: "https://newconnect.pl/rss_komunikaty"
+    max_silence_business_hours: 400

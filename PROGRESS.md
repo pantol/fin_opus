@@ -90,6 +90,30 @@ ZERO LLM in the money path. **Tests:** 353 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-23 (late evening) — Filings completeness monitor + official feeds
+- **User direction: confirmed completeness + official communiques.** Live
+  probe results (2026-07-23): the statutory company-ESPI wire IS PAP and we
+  already ingest it (`pap_biznes`: ~24/25 window items are numbered
+  dispatches); espi.pap.pl and infostrefa.com expose NO public RSS; PAP's
+  window is ~25 items/few hours, so completeness = poll cadence + monitoring,
+  not a better feed. Enabled the two verified OPERATOR feeds
+  (`gpw_komunikaty`, `newconnect_komunikaty` — suspensions/alert list; first
+  cycle ingested their full windows, 122 new items, 5/5 feeds healthy).
+- **`make check-data` now guards filings, not just prices**
+  (`quality.run_filings_checks`, thresholds in `data_quality.yaml`):
+  `filings_silent` (newest filing older than 12 BUSINESS hours — the
+  2026-07-03..22 hole detector; weekend hours never count),
+  `feed_silent` (per enabled feed, 48h default with per-feed override in
+  news_sources.yaml — operator notices are sporadic: gpw's newest item was
+  legitimately 15 days old on enable day), `filings_low_volume` (trailing
+  3-day floor), `filings_missing_text` (share of instrument-MAPPED filings
+  with <200-char bodies — catches PAP pages yielding no text: all 7 mapped
+  PAP dispatches to date are title-only). Same report/alert path as price
+  checks; Polish alert labels added. Tests: **359 passing** (6 new).
+  Known follow-ups: body re-fetch for empty PAP texts, PDF attachments of
+  periodic reports, Stage-0 cron (without the clock every quiet day still
+  loses RSS-window history).
+
 ### 2026-07-23 (late evening) — LLM materialization widened beyond the curated universe (DB-driven)
 - **`make llm` targets are now discovered from the DB, not `config/universe.yaml`**
   (`pipeline.discover_unprocessed_instruments()`): every instrument with

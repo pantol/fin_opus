@@ -596,7 +596,12 @@ def cmd_check_data(args) -> int:
 
     conn = connect(args.db)
     init_db(conn)
-    report = quality.run_checks(conn, cfg.load_universe(), cfg.load_data_quality())
+    dq_cfg = cfg.load_data_quality()
+    report = quality.run_checks(conn, cfg.load_universe(), dq_cfg)
+    # Filings completeness rides in the same report/alert: a silent collector
+    # is lost history (RSS has no backfill), same severity as broken prices.
+    report.issues.extend(quality.run_filings_checks(
+        conn, cfg.load_news_sources().get("feeds", []), dq_cfg))
     print(quality.format_report(report))
     conn.close()
     if not report.ok:

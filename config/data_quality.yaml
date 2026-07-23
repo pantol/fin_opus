@@ -10,3 +10,17 @@ stale_sessions: 5
 
 # How many example rows to print per issue category in the report.
 max_examples: 10
+
+# Filings (ESPI/news) completeness. RSS has no backfill: silence = permanently
+# lost history (2026-07-03..22 was such a hole), so silence must ALERT, not be
+# discovered post-mortem. Business hours = Mon-Fri wall clock (weekends are
+# quiet on the wire and never count toward silence).
+filings:
+  max_silence_business_hours: 12    # newest filing across ALL enabled feeds
+  max_feed_silence_business_hours: 48  # per feed (operator feeds are low-volume)
+  volume_lookback_days: 3
+  min_filings_per_lookback: 10      # whole market publishes dozens per weekday
+  text_lookback_days: 7
+  short_text_chars: 200             # body shorter than this = "title only"
+  max_short_text_ratio: 0.5         # share of short bodies among MAPPED filings
+  min_mapped_sample: 3              # don't judge a feed on fewer mapped items

@@ -7,13 +7,20 @@ Read-only, deterministic sanity checks over ingested prices:
     on that ex-date to explain them,
   - stale tickers: alive per listing dates but not printing bars.
 
+And over collected filings (ESPI/news completeness — RSS has no backfill, so
+a silent collector loses history PERMANENTLY; see run_filings_checks).
+
 The monitor only reports; it never mutates data. Alerting is the caller's job.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.ingestion.refdata import price_factor
+
+WARSAW = ZoneInfo("Europe/Warsaw")
 
 
 @dataclass
@@ -194,6 +201,152 @@ def run_checks(conn, universe: dict, dq_cfg: dict) -> QualityReport:
     return report
 
 
+# --- filings completeness (ESPI/news collector) -------------------------------
+
+def _business_hours_between(t0: datetime, t1: datetime) -> float:
+    """Hours between two tz-aware instants counting Mon-Fri only.
+
+    Weekend hours are excluded wholesale (the ESPI wire is quiet then); no
+    intraday business window is modeled. Deterministic and DST-correct by
+    walking day boundaries in the t1 timezone.
+    """
+    if t1 <= t0:
+        return 0.0
+    total = 0.0
+    cur = t0
+    while cur < t1:
+        day_end = datetime.combine(
+            cur.date() + timedelta(days=1), datetime.min.time(), tzinfo=cur.tzinfo)
+        chunk_end = min(day_end, t1)
+        if cur.weekday() < 5:  # Mon..Fri
+            total += (chunk_end - cur).total_seconds() / 3600.0
+        cur = chunk_end
+    return total
+
+
+def _newest_published(conn, source: str | None = None) -> datetime | None:
+    row = conn.execute(
+        "SELECT MAX(published_at) AS m FROM filings"
+        + (" WHERE source = ?" if source else ""),
+        (source,) if source else (),
+    ).fetchone()
+    if not row or not row["m"]:
+        return None
+    return datetime.fromisoformat(row["m"])
+
+
+def run_filings_checks(conn, feeds: list[dict], dq_cfg: dict,
+                       *, now: datetime | None = None) -> list[Issue]:
+    """Completeness checks over the `filings` store (read-only).
+
+    RSS feeds have short windows and NO backfill: any silent stretch is
+    permanently lost history (2026-07-03..22 is such a hole). These checks
+    turn silence into an alert instead of a post-mortem discovery:
+      - filings_silent: newest stored filing across ALL enabled feeds is older
+        than `max_silence_business_hours` (weekend hours excluded);
+      - feed_silent: one enabled feed stopped yielding items while others
+        flow (per-feed threshold is larger — operator feeds are low-volume);
+      - filings_low_volume: fewer than `min_filings_per_lookback` filings
+        published in the trailing `volume_lookback_days`;
+      - filings_missing_text: among filings MAPPED to instruments (the ones
+        the LLM will read), a feed's share of empty/short bodies exceeds
+        `max_short_text_ratio` (catches e.g. PAP pages yielding no text).
+    """
+    fq = dict(dq_cfg.get("filings") or {})
+    max_silence_h = float(fq.get("max_silence_business_hours", 12.0))
+    max_feed_silence_h = float(fq.get("max_feed_silence_business_hours", 48.0))
+    volume_days = int(fq.get("volume_lookback_days", 3))
+    min_volume = int(fq.get("min_filings_per_lookback", 10))
+    text_days = int(fq.get("text_lookback_days", 7))
+    short_chars = int(fq.get("short_text_chars", 200))
+    max_short_ratio = float(fq.get("max_short_text_ratio", 0.5))
+    min_mapped_sample = int(fq.get("min_mapped_sample", 3))
+
+    now = now or datetime.now(WARSAW)
+    issues: list[Issue] = []
+    enabled = [f for f in feeds if f.get("enabled")]
+    if not enabled:
+        return [Issue("filings_silent", "collector",
+                      "no enabled feeds in config/news_sources.yaml — the "
+                      "filings store cannot grow")]
+
+    # --- global silence (the 3-week-hole detector) ---
+    newest = _newest_published(conn)
+    if newest is None:
+        issues.append(Issue("filings_silent", "collector",
+                            "filings table is empty — collector has never "
+                            "stored an item"))
+    else:
+        silent_h = _business_hours_between(newest, now)
+        if silent_h > max_silence_h:
+            issues.append(Issue(
+                "filings_silent", "collector",
+                f"newest filing is {silent_h:.0f} business-hours old "
+                f"(published {newest.isoformat()}); threshold "
+                f"{max_silence_h:.0f}h — RSS has no backfill, this gap is "
+                "already lost history",
+            ))
+
+    # --- per-feed silence (one dead source among living ones). A feed entry
+    # may override the threshold: exchange-OPERATOR feeds legitimately go
+    # weeks without a notice, while a company wire silent for two days is
+    # broken — one global number cannot serve both. ---
+    for feed in enabled:
+        name = str(feed.get("name", "?"))
+        feed_threshold_h = float(
+            feed.get("max_silence_business_hours", max_feed_silence_h))
+        newest_feed = _newest_published(conn, source=name)
+        if newest_feed is None:
+            issues.append(Issue("feed_silent", name,
+                                "enabled feed has never stored an item"))
+            continue
+        silent_h = _business_hours_between(newest_feed, now)
+        if silent_h > feed_threshold_h:
+            issues.append(Issue(
+                "feed_silent", name,
+                f"newest item is {silent_h:.0f} business-hours old "
+                f"(published {newest_feed.isoformat()}); threshold "
+                f"{feed_threshold_h:.0f}h",
+            ))
+
+    # --- trailing volume floor ---
+    cutoff = (now - timedelta(days=volume_days)).isoformat()
+    n_recent = conn.execute(
+        "SELECT COUNT(*) AS c FROM filings WHERE published_at >= ?",
+        (cutoff,),
+    ).fetchone()["c"]
+    if n_recent < min_volume:
+        issues.append(Issue(
+            "filings_low_volume", "collector",
+            f"only {n_recent} filings published in the last {volume_days} "
+            f"day(s); floor {min_volume} — the whole market publishes dozens "
+            "per weekday",
+        ))
+
+    # --- mapped-filing body completeness (what the LLM actually reads) ---
+    text_cutoff = (now - timedelta(days=text_days)).isoformat()
+    for feed in enabled:
+        name = str(feed.get("name", "?"))
+        row = conn.execute(
+            "SELECT COUNT(*) AS total,"
+            " SUM(LENGTH(COALESCE(full_text,'')) < ?) AS short"
+            " FROM filings WHERE source = ? AND instrument_id IS NOT NULL"
+            " AND published_at >= ?",
+            (short_chars, name, text_cutoff),
+        ).fetchone()
+        total = int(row["total"] or 0)
+        short = int(row["short"] or 0)
+        if total >= min_mapped_sample and short / total > max_short_ratio:
+            issues.append(Issue(
+                "filings_missing_text", name,
+                f"{short}/{total} instrument-mapped filings in the last "
+                f"{text_days} day(s) have <{short_chars} chars of body text — "
+                "the LLM reads titles only for those",
+            ))
+
+    return issues
+
+
 def format_report(report: QualityReport) -> str:
     """Plain-text report for the CLI."""
     lines = [
@@ -218,6 +371,10 @@ def format_alert_pl(report: QualityReport) -> str:
         "unexplained_jump": "niewyjasnione skoki cen",
         "stale_ticker": "nieaktualne notowania",
         "no_data": "brak danych",
+        "filings_silent": "cisza w raportach ESPI (tracona historia!)",
+        "feed_silent": "martwe zrodlo RSS",
+        "filings_low_volume": "za malo raportow ESPI",
+        "filings_missing_text": "raporty bez tresci (LLM czyta sam tytul)",
     }
     lines = ["⚠️ Kontrola danych GPW: wykryto problemy"]
     for category, n in sorted(counts.items()):

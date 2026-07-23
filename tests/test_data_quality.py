@@ -195,3 +195,115 @@ def test_override_journal_is_append_only(tmp_path):
     rows = conn.execute("SELECT action_taken FROM overrides ORDER BY id").fetchall()
     assert [r["action_taken"] for r in rows] == ["a1", "a2"]
     conn.close()
+
+
+# --- filings completeness (run_filings_checks) --------------------------------
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from app.ingestion import filings_db
+
+WARSAW = ZoneInfo("Europe/Warsaw")
+FEEDS = [{"name": "feed_a", "enabled": True}, {"name": "feed_b", "enabled": True}]
+
+
+def _filing(conn, *, source, published_at, dedup, instrument_id=None, text="x" * 500):
+    filings_db.ensure_schema(conn)
+    filings_db.insert_filing(conn, {
+        "source": source, "issuer_isin": None, "issuer_name": "X",
+        "instrument_id": instrument_id, "espi_ebi_type": "ESPI",
+        "report_number": None, "title": "T", "published_at": published_at,
+        "fetched_at": published_at, "url": None, "full_text": text,
+        "content_hash": dedup, "dedup_key": dedup,
+    })
+    conn.commit()
+
+
+def test_business_hours_skip_weekends():
+    fri_17 = datetime(2026, 7, 17, 17, 0, tzinfo=WARSAW)   # Friday
+    mon_09 = datetime(2026, 7, 20, 9, 0, tzinfo=WARSAW)    # Monday
+    # Fri 17->24 = 7h, weekend = 0h, Mon 0->9 = 9h
+    assert quality._business_hours_between(fri_17, mon_09) == pytest.approx(16.0)
+    assert quality._business_hours_between(mon_09, fri_17) == 0.0
+
+
+def test_filings_silence_fires_and_clears(conn):
+    now = datetime(2026, 7, 23, 19, 0, tzinfo=WARSAW)      # Thursday evening
+    fq = {"filings": {"max_silence_business_hours": 12}}
+    # Empty table -> silent.
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert any(i.category == "filings_silent" for i in issues)
+    # Fresh item this afternoon -> global silence clears (feed_b still silent).
+    _filing(conn, source="feed_a", published_at="2026-07-23T15:00:00+02:00", dedup="a1")
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert not any(i.category == "filings_silent" for i in issues)
+    assert any(i.category == "feed_silent" and i.ticker == "feed_b" for i in issues)
+    # A 3-week hole (last item 2026-07-02, checked 2026-07-23) MUST fire.
+    conn.execute("DELETE FROM filings")
+    _filing(conn, source="feed_a", published_at="2026-07-02T15:00:00+02:00", dedup="a2")
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert any(i.category == "filings_silent" for i in issues)
+
+
+def test_filings_low_volume_floor(conn):
+    now = datetime(2026, 7, 23, 19, 0, tzinfo=WARSAW)
+    fq = {"filings": {"min_filings_per_lookback": 3, "volume_lookback_days": 3,
+                      "max_silence_business_hours": 1000,
+                      "max_feed_silence_business_hours": 1000}}
+    _filing(conn, source="feed_a", published_at="2026-07-23T10:00:00+02:00", dedup="v1")
+    _filing(conn, source="feed_b", published_at="2026-07-23T11:00:00+02:00", dedup="v2")
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert any(i.category == "filings_low_volume" for i in issues)
+    _filing(conn, source="feed_a", published_at="2026-07-22T10:00:00+02:00", dedup="v3")
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert not any(i.category == "filings_low_volume" for i in issues)
+
+
+def test_filings_missing_text_on_mapped_items_only(conn):
+    now = datetime(2026, 7, 23, 19, 0, tzinfo=WARSAW)
+    fq = {"filings": {"max_silence_business_hours": 1000,
+                      "max_feed_silence_business_hours": 1000,
+                      "min_filings_per_lookback": 0, "min_mapped_sample": 3,
+                      "short_text_chars": 200, "max_short_text_ratio": 0.5}}
+    iid = _ingest(conn, "pko", synthetic_series(n=5, base=100, drift=0.0))
+    # Three mapped title-only items -> ratio 3/3 fires for feed_a.
+    for i in range(3):
+        _filing(conn, source="feed_a", published_at=f"2026-07-2{i}T10:00:00+02:00",
+                dedup=f"m{i}", instrument_id=iid, text="")
+    # Unmapped empties on feed_b must NOT count (news noise, not LLM input).
+    for i in range(3):
+        _filing(conn, source="feed_b", published_at=f"2026-07-2{i}T11:00:00+02:00",
+                dedup=f"u{i}", instrument_id=None, text="")
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    fired = [i for i in issues if i.category == "filings_missing_text"]
+    assert [i.ticker for i in fired] == ["feed_a"]
+    # Full-bodied mapped items push the ratio under the threshold.
+    for i in range(4):
+        _filing(conn, source="feed_a", published_at=f"2026-07-2{i}T12:00:00+02:00",
+                dedup=f"f{i}", instrument_id=iid)
+    issues = quality.run_filings_checks(conn, FEEDS, fq, now=now)
+    assert not any(i.category == "filings_missing_text" for i in issues)
+
+
+def test_no_enabled_feeds_is_itself_an_issue(conn):
+    issues = quality.run_filings_checks(conn, [{"name": "x", "enabled": False}], {},
+                                        now=datetime(2026, 7, 23, 19, 0, tzinfo=WARSAW))
+    assert [i.category for i in issues] == ["filings_silent"]
+
+
+def test_feed_silence_threshold_per_feed_override(conn):
+    now = datetime(2026, 7, 23, 19, 0, tzinfo=WARSAW)
+    fq = {"filings": {"max_silence_business_hours": 1000,
+                      "max_feed_silence_business_hours": 48,
+                      "min_filings_per_lookback": 0}}
+    feeds = [{"name": "wire", "enabled": True},
+             {"name": "operator", "enabled": True,
+              "max_silence_business_hours": 400}]
+    # Both feeds last published 2026-07-08 (~269 business hours before now):
+    # the wire fires at 48h, the operator clears under its 400h override.
+    _filing(conn, source="wire", published_at="2026-07-08T15:00:00+02:00", dedup="w1")
+    _filing(conn, source="operator", published_at="2026-07-08T15:30:00+02:00", dedup="o1")
+    issues = quality.run_filings_checks(conn, feeds, fq, now=now)
+    silent = [i.ticker for i in issues if i.category == "feed_silent"]
+    assert silent == ["wire"]

@@ -100,6 +100,21 @@ ZERO LLM in the money path. **Tests:** 348 passing.
   PKO/PEO/OPL, failed closed on 46 scoreless wide-market rule-passers
   (Digitanet/AB PL/ACTION entered the control only). Real book + day-series
   sandbox untouched; ZERO LLM calls in the decide path.
+- **Wide-market LLM backlog drained live** (user direction: every company
+  should carry an updatable score driving portfolio moves): the whole
+  non-curated filing backlog was scored in one evening run —
+  **+34 wide-market verdicts** (42 llm_features total as_of 2026-07-23, e.g.
+  WIKANA −0.85, SCANWAY −0.80, AIRWAY −0.70, XTPL +0.65, EUROTEL +0.60;
+  evidence-quote guardrail lowered confidence on 8), filings backlog now 0,
+  month-to-date LLM spend $0.14 of the $10 cap. The reusable DB-driven
+  `make llm` implementation (pipeline-level discovery with PIT cutoff,
+  "NAME (ISIN)" prompt identity shared with the evalset, per-run cap on new
+  instruments) lands via branch `claude/nervous-kapitsa-17a20f` (846eca2,
+  based on d23bfdc, 353 tests) — awaiting user merge. Still open for the
+  "score-driven book" vision: candidate ranking incl. llm_score (chip),
+  explicit neutral default + staleness decay for no-news names (a verdict
+  must age out), and the Stage-0 schedule from `docs/plan-window-7-19.md`
+  so scores refresh without manual runs.
 - **Explainable alert cards** (user review feedback: the bot's cards carried
   none of the "why"): BUY signal cards now show `Werdykt LLM: +0.40
   (pozytywny)` from the order's decision-time snapshot; a new informational

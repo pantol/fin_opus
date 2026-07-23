@@ -110,11 +110,20 @@ def run_ab(
     instruments, bench_close = engine.load_instruments(
         conn, universe, bench_ticker, mode=engine.universe_mode(bt_cfg))
 
+    # Attach materialized LLM features per arm, by what each config actually
+    # references (gate OR entry_ranking): since v2 the baseline ranks entries
+    # by llm_score too, and starving it of scores would make the A/B compare
+    # "gate + different ranking inputs" instead of the gate alone.
+    base_instruments = (engine.attach_llm_scores(conn, instruments)
+                        if engine.strategy_uses_llm_features(baseline_cfg)
+                        else instruments)
     base_res = engine.run_walk_forward(
-        instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,
+        base_instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,
         membership=membership,
     )
-    llm_instruments = engine.attach_llm_scores(conn, instruments)
+    llm_instruments = (engine.attach_llm_scores(conn, instruments)
+                       if engine.strategy_uses_llm_features(llm_cfg)
+                       else instruments)
     llm_res = engine.run_walk_forward(
         llm_instruments, bench_close, copy.deepcopy(llm_cfg), bt_cfg,
         membership=membership,

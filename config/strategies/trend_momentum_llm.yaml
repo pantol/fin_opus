@@ -8,7 +8,7 @@
 # and the name is simply not entered -- a safe default.
 
 name: trend_momentum_llm
-version: 1
+version: 2
 # The tradable universe is configured in backtest.yaml (universe.mode +
 # liquidity gate + optional index membership), not per strategy.
 
@@ -24,6 +24,16 @@ entry:
     - feature: llm_score        # [-1, 1] from synthesis verdict*conviction
       op: gte
       value: 0.0
+
+# Same cross-sectional entry ordering as the baseline (v2): best verdict first,
+# momentum as tiebreak. Under this strategy's llm_score gate every candidate is
+# scored, so the missing-last rule is a no-op here — kept identical to the
+# baseline so the A/B compares the GATE, not two different orderings.
+entry_ranking:
+  - feature: llm_score
+    order: desc
+  - feature: momentum_6m
+    order: desc
 
 # Exit: identical to baseline (ATR trailing stop OR trend break).
 exit:

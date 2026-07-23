@@ -26,7 +26,8 @@ from app.backtest import fills as fillmod
 from app.backtest import metrics as metricsmod
 from app.features import compute
 from app.risk import manager as risk
-from app.strategy.engine import EvalContext, Signal, evaluate
+from app.strategy.engine import (EvalContext, Signal, entry_rank_key,
+                                 entry_ranking_spec, evaluate)
 
 
 @dataclass
@@ -380,6 +381,7 @@ def run_backtest(
         )
     atr_mult = float(risk_cfg["atr_mult_stop"])
     liq_gate = liquidity_gate(bt_cfg)
+    rank_spec = entry_ranking_spec(strategy_cfg)  # validated once, up front
     views = build_feature_views(instruments)
 
     calendar = _trading_calendar(instruments)
@@ -482,7 +484,15 @@ def run_backtest(
         fill_index = di + lag
 
         # --- 3. evaluate signals on each instrument's close at T ---
+        # Two passes: the instrument sweep queues EXITs immediately (exits are
+        # never ranked) and only COLLECTS entry candidates; sizing then runs
+        # over the candidates in cross-sectional `entry_ranking` order, so a
+        # full book admits the strongest names, not the lowest instrument ids.
+        # Exits never touch `state`, so deferring entry sizing changes nothing
+        # but the entry order. Without entry_ranking the candidate list keeps
+        # the sweep order (instrument id) — the legacy behavior.
         day_ns = int(day.value)
+        entry_candidates: list[tuple[Instrument, dict, float, float]] = []
         for inst in instruments:
             if not _alive(inst, day):
                 continue
@@ -534,24 +544,7 @@ def run_backtest(
                 atr_val = snap.get("atr")
                 if not atr_val:
                     continue
-                sizing = risk.size_position(
-                    entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
-                    ticker=inst.ticker, sector=inst.sector,
-                )
-                if not sizing.accepted:
-                    continue
-                pending_orders.append({
-                    "side": "BUY", "ticker": inst.ticker, "qty": sizing.qty,
-                    "stop_price": sizing.stop_price, "fill_on_index": fill_index,
-                    "decision_date": day.date().isoformat(), "features": snap,
-                })
-                pending_buys[inst.ticker] = pending_orders[-1]
-                # reserve exposure within the same day to avoid over-allocating
-                est_cost = close * sizing.qty
-                state.exposure_by_name[inst.ticker] = state.exposure_by_name.get(inst.ticker, 0.0) + est_cost
-                if inst.sector is not None:
-                    state.exposure_by_sector[inst.sector] = state.exposure_by_sector.get(inst.sector, 0.0) + est_cost
-                state.open_positions += 1
+                entry_candidates.append((inst, snap, close, atr_val))
 
             elif sig == Signal.EXIT and in_pos and not has_pending_sell:
                 pending_orders.append({
@@ -560,6 +553,30 @@ def run_backtest(
                     "features": snap,
                 })
                 pending_sells.add(inst.ticker)
+
+        # --- 3b. size ranked entry candidates (risk layer, deterministic) ---
+        if rank_spec:
+            # Stable sort: candidates tied on every key keep instrument order.
+            entry_candidates.sort(key=lambda c: entry_rank_key(rank_spec, c[1]))
+        for inst, snap, close, atr_val in entry_candidates:
+            sizing = risk.size_position(
+                entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
+                ticker=inst.ticker, sector=inst.sector,
+            )
+            if not sizing.accepted:
+                continue
+            pending_orders.append({
+                "side": "BUY", "ticker": inst.ticker, "qty": sizing.qty,
+                "stop_price": sizing.stop_price, "fill_on_index": fill_index,
+                "decision_date": day.date().isoformat(), "features": snap,
+            })
+            pending_buys[inst.ticker] = pending_orders[-1]
+            # reserve exposure within the same day to avoid over-allocating
+            est_cost = close * sizing.qty
+            state.exposure_by_name[inst.ticker] = state.exposure_by_name.get(inst.ticker, 0.0) + est_cost
+            if inst.sector is not None:
+                state.exposure_by_sector[inst.sector] = state.exposure_by_sector.get(inst.sector, 0.0) + est_cost
+            state.open_positions += 1
 
     # --- close any open positions at the final available close (paper) ---
     # Apply realistic exit costs on the forced close (consistent with live exits).
@@ -831,10 +848,11 @@ def _series_asof(series: pd.Series | None, day: pd.Timestamp):
 
 
 def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
-    """True if any condition references an `llm_*` feature (llm_score,
-    llm_relevance, ...). Used to decide whether to attach materialized LLM
-    features before a backtest (so an LLM strategy is not silently starved of
-    its gate).
+    """True if any condition OR entry-ranking key references an `llm_*` feature
+    (llm_score, llm_relevance, ...). Used to decide whether to attach
+    materialized LLM features before a backtest (so an LLM strategy is not
+    silently starved of its gate — and a ranking-only user of llm_score is not
+    silently degraded to its momentum tiebreak).
     """
     def _walk(node) -> bool:
         if isinstance(node, dict):
@@ -846,7 +864,8 @@ def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
             return any(_walk(v) for v in node)
         return False
 
-    return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+    return (_walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+            or _walk(strategy_cfg.get("entry_ranking")))
 
 
 # Backwards-compatible aliases (pre-Pack-D names).

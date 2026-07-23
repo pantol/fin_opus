@@ -12,15 +12,21 @@ from __future__ import annotations
 
 import math
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from flask import Flask, abort, render_template
-from markupsafe import Markup, escape
+from flask import Flask, abort, redirect, render_template, request, url_for
+from markupsafe import Markup
+
+WARSAW = ZoneInfo("Europe/Warsaw")
 
 # Chart geometry (SVG user units; the element scales responsively via viewBox).
 CHART_W = 860
-CHART_H = 300
-PAD_L, PAD_R, PAD_T, PAD_B = 68, 84, 14, 30  # right pad fits direct labels
+CHART_H = 280
+PAD_L, PAD_R, PAD_T, PAD_B = 68, 116, 14, 30  # right pad fits name+value labels
+
+NEAR_STOP_BUFFER = 0.03  # flag a position whose close sits <3% above its stop
 
 
 def connect_ro(db_path: str | Path) -> sqlite3.Connection:
@@ -36,20 +42,27 @@ def fmt_pln(x, decimals: int = 2) -> str:
     if x is None:
         return "—"
     s = f"{float(x):,.{decimals}f}"
-    return s.replace(",", "\u00a0").replace(".", ",")  # NBSP thousands (Polish, no wrap)
+    return s.replace(",", " ").replace(".", ",")  # NBSP thousands (Polish, no wrap)
 
 
-def fmt_pct(x, signed: bool = True) -> str:
+def fmt_pct(x, signed: bool = True, decimals: int = 2) -> str:
     if x is None:
         return "—"
     sign = "+" if signed else ""
-    return f"{float(x) * 100:{sign}.2f}%".replace(".", ",")
+    return f"{float(x) * 100:{sign}.{decimals}f}%".replace(".", ",")
 
 
 def fmt_qty(x) -> str:
     if x is None:
         return "—"
-    return f"{int(x):,}".replace(",", "\u00a0")  # NBSP thousands
+    return f"{int(x):,}".replace(",", " ")  # NBSP thousands
+
+
+def fmt_pp(x) -> str:
+    """Fraction difference -> percentage points, e.g. -0.0315 -> '-3,15 p.p.'"""
+    if x is None:
+        return "—"
+    return f"{float(x) * 100:+.2f}".replace(".", ",") + " p.p."
 
 
 # --- queries -------------------------------------------------------------------
@@ -71,6 +84,19 @@ LEFT JOIN strategies st ON st.id = s.strategy_id
 """
 
 
+def _day_change(equity_series: list[tuple[str, float]], initial: float | None):
+    """Last-session change: vs previous session, or vs initial capital for a
+    one-point book. Returns (delta, delta_pct, reference_label) or Nones."""
+    if len(equity_series) >= 2:
+        (prev_dt, prev), (_cur_dt, cur) = equity_series[-2], equity_series[-1]
+        if prev:
+            return cur - prev, cur / prev - 1.0, f"vs sesja {prev_dt}"
+    if len(equity_series) == 1 and initial:
+        cur = equity_series[-1][1]
+        return cur - initial, cur / initial - 1.0, "od startu księgi"
+    return None, None, None
+
+
 def users_overview(conn) -> list[dict]:
     rows = conn.execute(_STATE_SQL + " ORDER BY s.user_id").fetchall()
     out = []
@@ -78,6 +104,11 @@ def users_overview(conn) -> list[dict]:
         d = dict(r)
         d["equity"] = d["equity"] if d["equity"] is not None else d["cash"]
         d["ret"] = (d["equity"] / d["initial_capital"] - 1.0) if d["initial_capital"] else None
+        eq = [float(x[0]) for x in conn.execute(
+            "SELECT equity FROM (SELECT equity, date FROM equity_curve"
+            " WHERE user_id = ? ORDER BY date DESC LIMIT 40) ORDER BY date",
+            (d["user_id"],)).fetchall()]
+        d["spark"] = build_sparkline(eq)
         out.append(d)
     return out
 
@@ -110,6 +141,12 @@ def _bench_series(conn, ticker: str, d_from: str, d_to: str) -> list[tuple[str, 
     return [(r["date"], float(r["close"])) for r in rows]
 
 
+def _days_between(d_from: str | None, d_to: str | None) -> int | None:
+    if not d_from or not d_to:
+        return None
+    return (date.fromisoformat(d_to) - date.fromisoformat(d_from)).days
+
+
 def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
     state = conn.execute(_STATE_SQL + " WHERE s.user_id = ?", (user_id,)).fetchone()
     if state is None:
@@ -126,6 +163,8 @@ def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
         (user_id,),
     ).fetchall()
     equity_series = [(r["date"], float(r["equity"])) for r in eq_rows]
+    d["day_delta"], d["day_delta_pct"], d["day_ref_label"] = _day_change(
+        equity_series, initial)
 
     bench_series: list[tuple[str, float]] = []
     d["bench_ret"] = None
@@ -137,6 +176,8 @@ def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
             start_value = float(equity_series[0][1])
             bench_series = [(dt, start_value * c / base) for dt, c in raw]
             d["bench_ret"] = raw[-1][1] / base - 1.0
+    d["diff_pp"] = (d["ret"] - d["bench_ret"]
+                    if d["ret"] is not None and d["bench_ret"] is not None else None)
 
     open_rows = conn.execute(
         """
@@ -154,23 +195,37 @@ def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
         last_date, last = _last_close(conn, r["instrument_id"])
         pos["last_date"], pos["last_close"] = last_date, last
         if last is not None:
+            pos["value"] = last * r["qty"]
+            pos["weight"] = pos["value"] / d["equity"] if d["equity"] else None
             pos["pnl"] = (last - r["entry_price"]) * r["qty"]
             pos["pnl_pct"] = last / r["entry_price"] - 1.0 if r["entry_price"] else None
-            pos["to_stop_pct"] = (r["stop_price"] / last - 1.0) if r["stop_price"] else None
+            # Distance DOWN to the stop as a positive buffer; small buffer = risk.
+            pos["stop_buffer"] = (1.0 - r["stop_price"] / last) if r["stop_price"] else None
+            pos["near_stop"] = (pos["stop_buffer"] is not None
+                                and pos["stop_buffer"] < NEAR_STOP_BUFFER)
             unrealized_total += pos["pnl"]
         else:
-            pos["pnl"] = pos["pnl_pct"] = pos["to_stop_pct"] = None
+            pos["value"] = pos["weight"] = None
+            pos["pnl"] = pos["pnl_pct"] = pos["stop_buffer"] = None
+            pos["near_stop"] = False
         open_positions.append(pos)
+    open_positions.sort(key=lambda p: p["value"] or 0.0, reverse=True)
     d["unrealized_total"] = unrealized_total if open_positions else None
 
-    pending = [dict(r) for r in conn.execute(
+    pending = []
+    for r in conn.execute(
         """
-        SELECT o.side, o.qty, o.stop_price, o.decision_date, i.ticker, i.name
+        SELECT o.side, o.qty, o.stop_price, o.decision_date,
+               i.id AS instrument_id, i.ticker, i.name
         FROM paper_orders o JOIN instruments i ON i.id = o.instrument_id
         WHERE o.user_id = ? AND o.status = 'PENDING' ORDER BY o.id
         """,
         (user_id,),
-    ).fetchall()]
+    ).fetchall():
+        o = dict(r)
+        _dt, last = _last_close(conn, r["instrument_id"])
+        o["est_value"] = last * r["qty"] if last is not None else None
+        pending.append(o)
 
     closed = []
     for r in conn.execute(
@@ -188,18 +243,24 @@ def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
             r["exit_price"] / r["entry_price"] - 1.0
             if r["exit_price"] is not None and r["entry_price"] else None
         )
+        c["days"] = _days_between(r["entry_date"], r["exit_date"])
         closed.append(c)
 
-    trades = [dict(r) for r in conn.execute(
+    trades = []
+    for r in conn.execute(
         """
         SELECT t.trade_date, t.side, t.qty, t.price, t.fee, i.ticker
         FROM trades t JOIN instruments i ON i.id = t.instrument_id
         WHERE t.user_id = ? ORDER BY t.trade_date DESC, t.id DESC LIMIT 20
         """,
         (user_id,),
-    ).fetchall()]
+    ).fetchall():
+        t = dict(r)
+        t["value"] = t["qty"] * t["price"]
+        trades.append(t)
 
-    chart = build_chart(equity_series, bench_series, bench_ticker.upper())
+    chart = build_chart(equity_series, bench_series, bench_ticker.upper(),
+                        start_ref=initial)
     return {
         "state": d, "open_positions": open_positions, "pending": pending,
         "closed": closed, "trades": trades, "chart": chart,
@@ -210,7 +271,7 @@ def dashboard_data(conn, user_id: str, bench_ticker: str) -> dict | None:
     }
 
 
-# --- SVG line chart (server-rendered; palette lives in CSS custom properties) --
+# --- SVG charts (server-rendered; palette lives in CSS custom properties) ------
 
 def _y_ticks(lo: float, hi: float, n: int = 4) -> list[float]:
     """Round tick values (1/2/2.5/5 x 10^k steps) inside [lo, hi]."""
@@ -226,13 +287,42 @@ def _y_ticks(lo: float, hi: float, n: int = 4) -> list[float]:
     return ticks or [lo, hi]
 
 
+def build_sparkline(points: list[float], w: int = 120, h: int = 30) -> Markup | None:
+    """Tiny inline equity sparkline for the user list (no axes, no labels)."""
+    if not points:
+        return None
+    lo, hi = min(points), max(points)
+    if hi - lo < 1e-9:
+        lo, hi = lo - 1.0, hi + 1.0
+    n = len(points)
+
+    def sx(i: int) -> float:
+        return 3 + (w - 6) * (i / (n - 1)) if n > 1 else w / 2
+
+    def sy(v: float) -> float:
+        return 3 + (h - 6) * (1.0 - (v - lo) / (hi - lo))
+
+    line = ""
+    if n > 1:
+        pts = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(points))
+        line = (f'<polyline points="{pts}" fill="none" stroke="var(--series-1)"'
+                f' stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+    return Markup(
+        f'<svg class="spark" viewBox="0 0 {w} {h}" width="{w}" height="{h}"'
+        f' aria-hidden="true">{line}<circle cx="{sx(n - 1):.1f}"'
+        f' cy="{sy(points[-1]):.1f}" r="2.5" fill="var(--series-1)"/></svg>')
+
+
 def build_chart(equity: list[tuple[str, float]],
                 bench: list[tuple[str, float]],
-                bench_label: str) -> dict | None:
+                bench_label: str,
+                start_ref: float | None = None) -> dict | None:
     """Layout for the equity-vs-benchmark line chart.
 
     Returns geometry the template drops into an inline SVG plus the point data
-    the hover script needs; None when there is nothing to plot yet.
+    the hover script needs; None when there is nothing to plot yet. start_ref
+    (initial capital) always sits inside the y-domain and gets a dotted
+    reference line, so gains/losses read against a stable anchor.
     """
     if not equity:
         return None
@@ -241,6 +331,8 @@ def build_chart(equity: list[tuple[str, float]],
     span = max(len(dates) - 1, 1)
 
     values = [v for _, v in equity] + [v for _, v in bench]
+    if start_ref is not None:
+        values = values + [start_ref]
     lo, hi = min(values), max(values)
     if hi - lo < 1e-9:  # flat/single-point book: give the axis some air
         pad = max(abs(hi) * 0.01, 1.0)
@@ -253,7 +345,9 @@ def build_chart(equity: list[tuple[str, float]],
     plot_h = CHART_H - PAD_T - PAD_B
 
     def px(dt: str) -> float:
-        return round(PAD_L + plot_w * x_of[dt] / span, 2)
+        # A one-session book renders as a centered dot, not one glued to the axis.
+        pos = 0.5 if len(dates) == 1 else x_of[dt] / span
+        return round(PAD_L + plot_w * pos, 2)
 
     def py(v: float) -> float:
         return round(PAD_T + plot_h * (1.0 - (v - lo) / (hi - lo)), 2)
@@ -266,6 +360,7 @@ def build_chart(equity: list[tuple[str, float]],
             "points": " ".join(f"{px(dt)},{py(v)}" for dt, v in pts),
             "single": len(pts) == 1,
             "cx": px(pts[-1][0]), "cy": py(pts[-1][1]),
+            "last_value": fmt_pln(pts[-1][1], 0),
             "ys": [py(by_date[dt]) if dt in by_date else None for dt in dates],
             "values": [by_date.get(dt) for dt in dates],
         }
@@ -273,21 +368,30 @@ def build_chart(equity: list[tuple[str, float]],
     all_series = [series(equity, "Portfel", "--series-1")]
     if bench:
         all_series.append(series(bench, bench_label, "--series-2"))
-    # Direct labels sit at the line ends; nudge one label when they collide.
-    if len(all_series) == 2 and abs(all_series[0]["cy"] - all_series[1]["cy"]) < 14:
-        lower = max(all_series, key=lambda s: s["cy"])
-        lower["label_y"] = lower["cy"] + 14
+    # Two-line direct labels (name + value) need ~26px; nudge on collision.
+    # sorted() keeps insertion order on ties, so equal-cy series (a fresh flat
+    # book) still split into a distinct upper and lower label.
+    if len(all_series) == 2 and abs(all_series[0]["cy"] - all_series[1]["cy"]) < 30:
+        upper, lower = sorted(all_series, key=lambda s: s["cy"])
+        mid = (all_series[0]["cy"] + all_series[1]["cy"]) / 2
+        upper["label_y"] = mid - 15
+        lower["label_y"] = mid + 15
     for s in all_series:
         s.setdefault("label_y", s["cy"])
 
     n_x = min(len(dates), 3)
     x_label_idx = sorted({0, len(dates) // 2, len(dates) - 1})[:n_x]
+    ref = None
+    if start_ref is not None:
+        ref = {"y": py(start_ref), "label": fmt_pln(start_ref, 0)}
     return {
         "w": CHART_W, "h": CHART_H,
         "pad_l": PAD_L, "pad_r": PAD_R, "pad_t": PAD_T, "pad_b": PAD_B,
         "grid": [{"y": py(t), "label": fmt_pln(t, 0)} for t in _y_ticks(lo, hi)],
         "x_labels": [{"x": px(dates[i]), "label": dates[i]} for i in x_label_idx],
         "series": all_series,
+        "ref": ref,
+        "single_session": len(dates) == 1,
         "hover": {"xs": [px(dt) for dt in dates], "dates": dates,
                   "series": [{"name": s["name"], "var": s["var"],
                               "ys": s["ys"], "values": s["values"]}
@@ -315,12 +419,19 @@ def create_app(db_path: str | Path | None = None,
     app.jinja_env.filters["pln"] = fmt_pln
     app.jinja_env.filters["pct"] = fmt_pct
     app.jinja_env.filters["qty"] = fmt_qty
+    app.jinja_env.filters["pp"] = fmt_pp
 
     def _open():
         try:
             return connect_ro(app.config["DB_PATH"])
         except sqlite3.OperationalError:
             return None
+
+    def _page(template: str, **ctx):
+        ctx.setdefault("db", app.config["DB_PATH"])
+        ctx.setdefault("generated",
+                       datetime.now(WARSAW).strftime("%Y-%m-%d %H:%M"))
+        return render_template(template, **ctx)
 
     @app.get("/healthz")
     def healthz():
@@ -330,30 +441,32 @@ def create_app(db_path: str | Path | None = None,
     def index():
         conn = _open()
         if conn is None:
-            return render_template("no_db.html", db=app.config["DB_PATH"]), 503
+            return _page("no_db.html"), 503
         try:
             users = users_overview(conn)
         finally:
             conn.close()
-        return render_template("index.html", users=users, db=app.config["DB_PATH"])
+        # One book -> straight to its dashboard; ?stay=1 (breadcrumb) shows the list.
+        if len(users) == 1 and request.args.get("stay") is None:
+            return redirect(url_for("user_dashboard", user_id=users[0]["user_id"]))
+        return _page("index.html", users=users)
 
     @app.get("/u/<user_id>")
     def user_dashboard(user_id: str):
         conn = _open()
         if conn is None:
-            return render_template("no_db.html", db=app.config["DB_PATH"]), 503
+            return _page("no_db.html"), 503
         try:
             data = dashboard_data(conn, user_id, app.config["BENCH_TICKER"])
         finally:
             conn.close()
         if data is None:
             abort(404)
-        return render_template("user.html", db=app.config["DB_PATH"],
-                               bench_label=app.config["BENCH_TICKER"].upper(),
-                               **data)
+        return _page("user.html",
+                     bench_label=app.config["BENCH_TICKER"].upper(), **data)
 
     @app.errorhandler(404)
     def not_found(_e):
-        return render_template("not_found.html", db=app.config["DB_PATH"]), 404
+        return _page("not_found.html"), 404
 
     return app

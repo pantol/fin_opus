@@ -228,18 +228,29 @@ def test_previous_run_catches_model_only_change(conn):
 
 # --- spend cap ----------------------------------------------------------------------
 
+def _pinned_prices():
+    """Test-owned price table for whatever models config/llm.yaml currently
+    names — cost math must not silently change when ops retunes the config."""
+    cfg = load_llm_config()
+    return {"prices": {
+        cfg["extraction"]["model"]: {"input_per_1m": 0.15, "output_per_1m": 0.60},
+        cfg["synthesis"]["model"]: {"input_per_1m": 1.40, "output_per_1m": 4.40},
+    }}
+
+
 def test_costs_recorded_per_live_call(conn):
-    client = _make_client(conn, lambda body: json.dumps(_research_payload()))
+    client = _make_client(conn, lambda body: json.dumps(_research_payload()),
+                          cfg_over=_pinned_prices())
     client.complete_json("extraction", [{"role": "user", "content": "a"}])
     row = conn.execute("SELECT * FROM llm_costs").fetchone()
     assert row["prompt_tokens"] == 1000 and row["completion_tokens"] == 200
-    # gpt-4o-mini: 1000/1e6*0.15 + 200/1e6*0.60 = 0.00015 + 0.00012
+    # pinned extraction price: 1000/1e6*0.15 + 200/1e6*0.60 = 0.00015 + 0.00012
     assert row["cost_usd"] == pytest.approx(0.00027)
     assert row["llm_call_id"] is not None
 
 
 def test_cap_blocks_live_calls_but_not_cache_hits(conn):
-    tiny = {"budget": {"monthly_usd_cap": 0.0002}}
+    tiny = {"budget": {"monthly_usd_cap": 0.0002}, **_pinned_prices()}
     client = _make_client(conn, lambda body: json.dumps(_research_payload()),
                           cfg_over=tiny)
     messages = [{"role": "user", "content": "a"}]

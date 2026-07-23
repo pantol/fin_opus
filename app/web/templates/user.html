@@ -1,38 +1,57 @@
 {% extends "base.html" %}
 {% block title %}{{ state.user_id }} — Dashboard GPW{% endblock %}
+{% block headmeta %}
+<span class="session">ostatnia rozliczona sesja: <strong>{{ state.last_settled_date }}</strong></span>
+{% endblock %}
 {% block content %}
-<div class="crumbs"><a href="/">Użytkownicy</a> › <strong>{{ state.user_id }}</strong>
+<div class="crumbs"><a href="/?stay=1">Użytkownicy</a> › <strong>{{ state.user_id }}</strong>
   {% if state.strategy_name %} · strategia {{ state.strategy_name }} v{{ state.strategy_version }}{% endif %}
-  · księga od {{ state.inception_date }} · ostatnia rozliczona sesja {{ state.last_settled_date }}
+  · księga od {{ state.inception_date }}
 </div>
 
-<div class="tiles">
-  <div class="tile">
+<div class="hero">
+  <div>
     <div class="label">Kapitał</div>
-    <div class="value">{{ state.equity | pln }} PLN</div>
-    <div class="sub">start: {{ state.initial_capital | pln }} PLN</div>
+    <div class="big">{{ state.equity | pln }}<span class="unit">PLN</span></div>
+    {% if state.day_delta is not none %}
+    <div class="delta {% if state.day_delta >= 0 %}pos{% else %}neg{% endif %}">
+      {% if state.day_delta >= 0 %}▲{% else %}▼{% endif %}
+      {{ state.day_delta | pln }} PLN ({{ state.day_delta_pct | pct }})
+      <span class="ref">{{ state.day_ref_label }}</span>
+    </div>
+    {% endif %}
   </div>
-  <div class="tile">
-    <div class="label">Gotówka</div>
-    <div class="value">{{ state.cash | pln }} PLN</div>
-    <div class="sub">ekspozycja: {{ state.exposure | pct(signed=False) }}</div>
+  <div class="aside">
+    start: {{ state.initial_capital | pln(0) }} PLN · szczyt: {{ state.peak_equity | pln(0) }} PLN
+    {% if state.unrealized_total is not none %}
+    <br>wynik niezrealizowany:
+    <strong class="{% if state.unrealized_total >= 0 %}pos{% else %}neg{% endif %}">{{ state.unrealized_total | pln }} PLN</strong>
+    {% endif %}
   </div>
-  <div class="tile">
+</div>
+
+<div class="statbar">
+  <div class="stat">
     <div class="label">Wynik od startu</div>
     <div class="value {% if state.ret is not none and state.ret >= 0 %}pos{% elif state.ret is not none %}neg{% endif %}">{{ state.ret | pct }}</div>
-    <div class="sub">{{ bench_label }} w tym okresie: {{ state.bench_ret | pct }}</div>
+    <div class="sub">{{ bench_label }}: {{ state.bench_ret | pct }}{% if state.diff_pp is not none %} · różnica {{ state.diff_pp | pp }}{% endif %}</div>
   </div>
-  <div class="tile">
+  <div class="stat">
+    <div class="label">Gotówka</div>
+    <div class="value">{{ state.cash | pln(0) }} <span style="font-size:14px;color:var(--text-secondary)">PLN</span></div>
+    <div class="sub">ekspozycja: {{ state.exposure | pct(signed=False) }}</div>
+  </div>
+  <div class="stat">
     <div class="label">Obsunięcie od szczytu</div>
     <div class="value">{{ state.drawdown | pct(signed=False) }}</div>
-    <div class="sub">szczyt: {{ state.peak_equity | pln }} PLN</div>
+    <div class="sub">szczyt: {{ state.peak_equity | pln(0) }} PLN</div>
   </div>
-  <div class="tile">
+  <div class="stat">
     <div class="label">Otwarte pozycje</div>
     <div class="value">{{ state.n_open }}</div>
-    <div class="sub">wynik niezrealizowany: {% if state.unrealized_total is not none %}<span class="{% if state.unrealized_total >= 0 %}pos{% else %}neg{% endif %}">{{ state.unrealized_total | pln }} PLN</span>{% else %}—{% endif %}</div>
+    <div class="sub">wg wartości rynkowej poniżej</div>
   </div>
-  <div class="tile">
+  <div class="stat">
     <div class="label">Zlecenia oczekujące</div>
     <div class="value">{{ state.n_pending }}</div>
     <div class="sub">realizacja: otwarcie następnej sesji</div>
@@ -46,6 +65,7 @@
     {% for s in chart.series %}
     <span><span class="sw" style="background: var({{ s.var }})"></span>{{ s.name }}</span>
     {% endfor %}
+    <span><span class="sw" style="background: var(--baseline)"></span>kapitał startowy</span>
   </div>
   <div class="chartwrap">
     <svg viewBox="0 0 {{ chart.w }} {{ chart.h }}" class="chart" id="eqchart" role="img"
@@ -54,6 +74,9 @@
       <line x1="{{ chart.pad_l }}" x2="{{ chart.w - chart.pad_r }}" y1="{{ g.y }}" y2="{{ g.y }}" class="grid"/>
       <text x="{{ chart.pad_l - 8 }}" y="{{ g.y }}" class="tick" text-anchor="end" dominant-baseline="middle">{{ g.label }}</text>
       {% endfor %}
+      {% if chart.ref %}
+      <line x1="{{ chart.pad_l }}" x2="{{ chart.w - chart.pad_r }}" y1="{{ chart.ref.y }}" y2="{{ chart.ref.y }}" class="refline"/>
+      {% endif %}
       {% for xl in chart.x_labels %}
       <text x="{{ xl.x }}" y="{{ chart.h - 8 }}" class="tick" text-anchor="middle">{{ xl.label }}</text>
       {% endfor %}
@@ -62,7 +85,8 @@
       <polyline points="{{ s.points }}" class="line{% if not loop.first %} dashed{% endif %}" style="stroke: var({{ s.var }})"/>
       {% endif %}
       <circle cx="{{ s.cx }}" cy="{{ s.cy }}" r="{% if s.single %}4{% else %}3{% endif %}" style="fill: var({{ s.var }})"/>
-      <text x="{{ s.cx + 8 }}" y="{{ s.label_y }}" class="dlabel" dominant-baseline="middle">{{ s.name }}</text>
+      <text x="{{ s.cx + 9 }}" y="{{ s.label_y - 7 }}" class="dlabel">{{ s.name }}</text>
+      <text x="{{ s.cx + 9 }}" y="{{ s.label_y + 8 }}" class="dvalue">{{ s.last_value }}</text>
       {% endfor %}
       <line id="xhair" class="xhair" x1="0" x2="0" y1="{{ chart.pad_t }}" y2="{{ chart.h - chart.pad_b }}" visibility="hidden"/>
       {% for s in chart.series %}
@@ -74,6 +98,9 @@
     </svg>
     <div id="tooltip" class="tooltip" hidden></div>
   </div>
+  {% if chart.single_session %}
+  <p class="empty">Na razie jedna rozliczona sesja — krzywa urośnie z kolejnymi wieczorami <code>make signals</code>.</p>
+  {% endif %}
   <details class="tableview">
     <summary>Dane wykresu (tabela)</summary>
     <table>
@@ -96,29 +123,32 @@
 </div>
 
 <div class="card">
-  <h2>Otwarte pozycje</h2>
+  <h2>Otwarte pozycje <span class="hint">— wg wartości rynkowej</span></h2>
   {% if open_positions %}
   <table>
     <thead>
       <tr>
-        <th>Spółka</th><th class="num">Ilość</th><th>Wejście</th>
+        <th>Spółka</th><th class="num">Ilość</th>
+        <th class="num">Wartość</th><th class="num">Udział</th>
         <th class="num">Cena wejścia</th><th class="num">Ostatni kurs</th>
-        <th class="num">Stop</th><th class="num">Do stopa</th>
-        <th class="num">Wynik</th><th class="num">Wynik %</th>
+        <th class="num">Wynik PLN</th><th class="num">Wynik %</th>
+        <th class="num">Stop</th><th class="num">Bufor do stopa</th>
       </tr>
     </thead>
     <tbody>
       {% for p in open_positions %}
       <tr>
-        <td><strong>{{ p.ticker | upper }}</strong><span class="sub">{{ p.name }}</span></td>
+        <td><strong>{{ p.ticker | upper }}</strong><span class="sub">{{ p.name }} · od {{ p.entry_date }}</span></td>
         <td class="num">{{ p.qty | qty }}</td>
-        <td>{{ p.entry_date }}</td>
+        <td class="num">{{ p.value | pln(0) }}</td>
+        <td class="num">{{ p.weight | pct(signed=False, decimals=1) }}</td>
         <td class="num">{{ p.entry_price | pln }}</td>
-        <td class="num">{{ p.last_close | pln }}{% if p.last_date %}<span class="sub">{{ p.last_date }}</span>{% endif %}</td>
-        <td class="num">{{ p.stop_price | pln }}</td>
-        <td class="num">{{ p.to_stop_pct | pct }}</td>
+        <td class="num">{{ p.last_close | pln }}{% if p.last_date and p.last_date != state.last_settled_date %}<span class="sub">{{ p.last_date }}</span>{% endif %}</td>
         <td class="num {% if p.pnl is not none and p.pnl >= 0 %}pos{% elif p.pnl is not none %}neg{% endif %}">{{ p.pnl | pln }}</td>
         <td class="num {% if p.pnl_pct is not none and p.pnl_pct >= 0 %}pos{% elif p.pnl_pct is not none %}neg{% endif %}">{{ p.pnl_pct | pct }}</td>
+        <td class="num">{{ p.stop_price | pln }}</td>
+        <td class="num">{{ p.stop_buffer | pct(signed=False, decimals=1) }}
+          {% if p.near_stop %}<span class="warnflag"><span class="dot"></span>blisko stopa</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -133,14 +163,16 @@
   {% if pending %}
   <table>
     <thead>
-      <tr><th>Akcja</th><th>Spółka</th><th class="num">Ilość</th><th class="num">Stop</th><th>Data decyzji</th></tr>
+      <tr><th>Akcja</th><th>Spółka</th><th class="num">Ilość</th>
+          <th class="num">Szac. wartość</th><th class="num">Stop</th><th>Data decyzji</th></tr>
     </thead>
     <tbody>
       {% for o in pending %}
       <tr>
-        <td><span class="badge">{% if o.side == 'BUY' %}KUP{% else %}SPRZEDAJ{% endif %}</span></td>
+        <td><span class="badge {% if o.side == 'BUY' %}buy{% else %}sell{% endif %}">{% if o.side == 'BUY' %}KUP{% else %}SPRZEDAJ{% endif %}</span></td>
         <td><strong>{{ o.ticker | upper }}</strong><span class="sub">{{ o.name }}</span></td>
         <td class="num">{{ o.qty | qty }}</td>
+        <td class="num">{% if o.est_value is not none %}≈ {{ o.est_value | pln(0) }}{% else %}—{% endif %}</td>
         <td class="num">{{ o.stop_price | pln }}</td>
         <td>{{ o.decision_date }}</td>
       </tr>
@@ -158,8 +190,8 @@
   <table>
     <thead>
       <tr>
-        <th>Spółka</th><th>Wejście</th><th class="num">Cena wejścia</th>
-        <th>Wyjście</th><th class="num">Cena wyjścia</th><th class="num">Zmiana</th>
+        <th>Spółka</th><th>Wejście</th><th>Wyjście</th><th class="num">Dni</th>
+        <th class="num">Cena wejścia</th><th class="num">Cena wyjścia</th><th class="num">Zmiana</th>
       </tr>
     </thead>
     <tbody>
@@ -167,8 +199,9 @@
       <tr>
         <td><strong>{{ c.ticker | upper }}</strong><span class="sub">{{ c.name }}</span></td>
         <td>{{ c.entry_date }}</td>
-        <td class="num">{{ c.entry_price | pln }}</td>
         <td>{{ c.exit_date }}</td>
+        <td class="num">{{ c.days if c.days is not none else "—" }}</td>
+        <td class="num">{{ c.entry_price | pln }}</td>
         <td class="num">{{ c.exit_price | pln }}</td>
         <td class="num {% if c.change_pct is not none and c.change_pct >= 0 %}pos{% elif c.change_pct is not none %}neg{% endif %}">{{ c.change_pct | pct }}</td>
       </tr>
@@ -185,16 +218,18 @@
   {% if trades %}
   <table>
     <thead>
-      <tr><th>Data</th><th>Strona</th><th>Spółka</th><th class="num">Ilość</th><th class="num">Cena</th><th class="num">Prowizja</th></tr>
+      <tr><th>Data</th><th>Strona</th><th>Spółka</th><th class="num">Ilość</th>
+          <th class="num">Cena</th><th class="num">Wartość</th><th class="num">Prowizja</th></tr>
     </thead>
     <tbody>
       {% for t in trades %}
       <tr>
         <td>{{ t.trade_date }}</td>
-        <td><span class="badge">{% if t.side == 'BUY' %}KUPNO{% else %}SPRZEDAŻ{% endif %}</span></td>
+        <td><span class="badge {% if t.side == 'BUY' %}buy{% else %}sell{% endif %}">{% if t.side == 'BUY' %}KUPNO{% else %}SPRZEDAŻ{% endif %}</span></td>
         <td><strong>{{ t.ticker | upper }}</strong></td>
         <td class="num">{{ t.qty | qty }}</td>
         <td class="num">{{ t.price | pln }}</td>
+        <td class="num">{{ t.value | pln(0) }}</td>
         <td class="num">{{ t.fee | pln }}</td>
       </tr>
       {% endfor %}

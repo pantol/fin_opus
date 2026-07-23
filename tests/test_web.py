@@ -103,12 +103,34 @@ def client(db_path):
 
 def test_index_lists_every_user(client):
     resp = client.get("/")
-    assert resp.status_code == 200
+    assert resp.status_code == 200   # two books -> list, no redirect
     html = resp.get_data(as_text=True)
     assert "paper:default" in html
     assert "paper:llm" in html
+    assert 'class="spark"' in html   # per-user equity sparkline
     assert "102 000,00" in html     # latest equity, Polish formatting (NBSP)
     assert "trend_momentum" in html
+
+
+def test_single_user_index_redirects(tmp_path):
+    path = tmp_path / "solo.db"
+    conn = connect(path)
+    init_db(conn)
+    conn.execute(
+        "INSERT INTO paper_state (user_id, cash, peak_equity, initial_capital,"
+        " inception_date, last_settled_date, config_hash, updated_at)"
+        " VALUES ('paper:solo', 1000, 1000, 1000,"
+        " '2026-07-20', '2026-07-22', 'h', ?)", (NOW,))
+    conn.commit()
+    conn.close()
+    app = create_app(path, benchmark_ticker="wig20tr")
+    app.testing = True
+    c = app.test_client()
+    assert c.get("/").status_code == 302
+    followed = c.get("/", follow_redirects=True)
+    assert followed.status_code == 200
+    assert "paper:solo" in followed.get_data(as_text=True)
+    assert c.get("/?stay=1").status_code == 200  # breadcrumb escape hatch
 
 
 def test_user_dashboard_renders_book(client):
@@ -123,6 +145,9 @@ def test_user_dashboard_renders_book(client):
     assert "+15,79%" in html              # unrealized pct
     assert "+2,00%" in html               # benchmark return 7000 -> 7140
     assert "+30,00%" in html              # closed position 80 -> 104
+    assert "+0,99%" in html               # day delta 101000 -> 102000
+    assert "18,2%" in html                # stop buffer: 1 - 90/110
+    assert "10,8%" in html                # weight: 100*110 / 102000
 
 
 def test_user_isolation(client):

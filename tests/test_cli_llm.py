@@ -50,6 +50,9 @@ def _insert_filing(conn, iid, published_at):
 
 def test_cli_llm_requires_api_key(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # cli.main() consumes ./.env; run from an empty cwd so a developer's real
+    # .env (with a live key) cannot defeat the delenv above.
+    monkeypatch.chdir(tmp_path)
     rc = cli.main(["--db", str(tmp_path / "x.db"), "llm"])
     assert rc == 2
     assert "OPENROUTER_API_KEY" in capsys.readouterr().out

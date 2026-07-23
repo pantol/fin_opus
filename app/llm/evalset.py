@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from app.llm import pipeline
 from app.llm import research as research_mod
 from app.llm.schemas import RELEVANCE_LABELS
 
@@ -134,11 +135,14 @@ class EvalReport:
 
 
 def _resolve_ticker(conn, row) -> str:
+    # Same identity the pipeline puts in prompts (pipeline.prompt_identity), so
+    # an eval call on an already-processed filing hits the pipeline's cache
+    # entry instead of re-spending on a differently-keyed prompt.
     if row["instrument_id"]:
-        hit = conn.execute("SELECT ticker FROM instruments WHERE id = ?",
+        hit = conn.execute("SELECT ticker, name, isin FROM instruments WHERE id = ?",
                            (row["instrument_id"],)).fetchone()
         if hit:
-            return hit["ticker"]
+            return pipeline.prompt_identity(hit["ticker"], hit["name"], hit["isin"])
     return (row["issuer_name"] or "unknown").lower()
 
 

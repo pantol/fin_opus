@@ -39,10 +39,101 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _eod_cutoff_warsaw(as_of_date: str) -> datetime:
+    """End of day T in Europe/Warsaw — the point-in-time cutoff for filings."""
+    return datetime.combine(datetime.fromisoformat(as_of_date).date(),
+                            time(23, 59, 59), tzinfo=WARSAW)
+
+
 def _filing_text(row) -> str:
     title = row["title"] or ""
     body = row["full_text"] or ""
     return f"{title}\n{body}".strip()
+
+
+def prompt_identity(ticker: str, name: str | None, isin: str | None) -> str:
+    """Issuer identity string for LLM prompts (deterministic, cache-stable).
+
+    Curated instruments keep their short ticker — changing it would change
+    input hashes and invalidate their existing llm_cache entries (a re-spend).
+    Archive-discovered instruments carry a lowercase ISIN as their ticker
+    (app.ingestion.gpw_archive), opaque to a language model, so they are
+    identified as "NAME (ISIN)" instead.
+    """
+    if isin and name and ticker.lower() == str(isin).lower():
+        return f"{name} ({str(isin).upper()})"
+    return ticker
+
+
+def discover_unprocessed_instruments(conn, as_of_date: str) -> tuple[list[dict], int]:
+    """Point-in-time discovery of LLM work: DB-driven, not universe.yaml-driven.
+
+    The collector resolves filings to instruments by ISIN, so filings routinely
+    map to instruments outside the curated universe (ticker = lowercase ISIN).
+    This returns every instrument worth running the pipeline for on date T.
+
+    Returns (targets, n_unmapped):
+      targets: one dict per instrument having unprocessed filings with
+        published_at <= end-of-day `as_of_date` (Europe/Warsaw) and
+        attempts < MAX_ATTEMPTS:
+          {instrument_id, ticker, name, isin, n_filings, first_published_at}
+        ordered by oldest unprocessed filing first, then instrument_id — a
+        deterministic order, so a per-run cap drains the backlog reproducibly.
+      n_unmapped: in-window unprocessed filings with no scoreable instrument
+        (instrument_id NULL, a dangling id, or an index row) — returned so the
+        caller can surface them instead of dropping them silently.
+
+    Read-only: no LLM call, no filing mutation.
+    """
+    rows = filings_db.select_filings_asof(
+        conn, _eod_cutoff_warsaw(as_of_date), only_unprocessed=True,
+        max_attempts=MAX_ATTEMPTS,
+    )
+    n_unmapped = 0
+    grouped: dict[int, dict] = {}
+    for row in rows:
+        iid = row["instrument_id"]
+        if iid is None:
+            n_unmapped += 1
+            continue
+        # Compare parsed instants, not ISO strings: stored offsets vary across
+        # DST, and string order is not chronological across mixed offsets.
+        published = datetime.fromisoformat(row["published_at"])
+        entry = grouped.get(int(iid))
+        if entry is None:
+            grouped[int(iid)] = {"n_filings": 1, "first": published}
+        else:
+            entry["n_filings"] += 1
+            if published < entry["first"]:
+                entry["first"] = published
+    if not grouped:
+        return [], n_unmapped
+
+    placeholders = ",".join("?" for _ in grouped)
+    by_id = {
+        int(r["id"]): r
+        for r in conn.execute(
+            f"SELECT id, ticker, name, isin, is_index FROM instruments"
+            f" WHERE id IN ({placeholders})",
+            list(grouped),
+        ).fetchall()
+    }
+    keyed = []
+    for iid, entry in grouped.items():
+        inst = by_id.get(iid)
+        if inst is None or inst["is_index"]:
+            n_unmapped += entry["n_filings"]
+            continue
+        keyed.append((entry["first"], iid, {
+            "instrument_id": iid,
+            "ticker": inst["ticker"],
+            "name": inst["name"],
+            "isin": inst["isin"],
+            "n_filings": entry["n_filings"],
+            "first_published_at": entry["first"].isoformat(),
+        }))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [target for _, _, target in keyed], n_unmapped
 
 
 def compute_feature_for_date(
@@ -68,11 +159,9 @@ def compute_feature_for_date(
 
     Returns the synthesis dict (with llm_score) or None if nothing to do / rejected.
     """
-    cutoff = datetime.combine(datetime.fromisoformat(as_of_date).date(),
-                              time(23, 59, 59), tzinfo=WARSAW)
     filings = filings_db.select_filings_asof(
-        conn, cutoff, instrument_id=instrument_id, only_unprocessed=True,
-        max_attempts=MAX_ATTEMPTS,
+        conn, _eod_cutoff_warsaw(as_of_date), instrument_id=instrument_id,
+        only_unprocessed=True, max_attempts=MAX_ATTEMPTS,
     )
     if not filings:
         return None

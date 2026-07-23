@@ -7,7 +7,7 @@
 empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
 standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
 C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 348 passing.
+ZERO LLM in the money path. **Tests:** 353 passing.
 
 ---
 
@@ -89,6 +89,30 @@ ZERO LLM in the money path. **Tests:** 348 passing.
 ---
 
 ## Changelog (newest first)
+
+### 2026-07-23 (late evening) — LLM materialization widened beyond the curated universe (DB-driven)
+- **`make llm` targets are now discovered from the DB, not `config/universe.yaml`**
+  (`pipeline.discover_unprocessed_instruments()`): every instrument with
+  unprocessed filings published ≤ end-of-day T (Europe/Warsaw — the same
+  point-in-time cutoff consumption uses, `attempts < MAX_ATTEMPTS`) is a
+  target, so filings the collector resolved by ISIN to archive-discovered
+  names (ticker = lowercase ISIN) finally get `llm_score` rows — closing
+  fresh-start-v2 observation 3 (the LLM book could only ever enter curated
+  names because a missing score fails entries closed).
+- **Backlog cost control:** non-curated targets are capped per run
+  (`--max-new-instruments`, default 10), oldest backlog first in a
+  deterministic order; curated names are never capped; deferrals and
+  unmappable filings are printed, never silent. Deferred filings stay
+  unprocessed and keep PIT semantics (a later run materializes them at that
+  later `as_of_date`). Budget hard cap / degraded-run flow, pinned provider +
+  generation-id logging, and validated-JSON-only outputs are unchanged.
+- **Prompt identity:** archive instruments enter prompts as `NAME (ISIN)`
+  instead of an opaque lowercase ISIN (`pipeline.prompt_identity()`); curated
+  tickers are unchanged so their llm_cache entries stay valid; `eval-llm`
+  resolves the same identity so eval hits the pipeline's cache. `--ticker`
+  now accepts any DB ticker (curated or ISIN) and errors on unknown ones.
+  Tests: **353 passing** (5 new: discovery PIT/ordering/filters, identity,
+  non-curated CLI coverage, per-run cap + deferral, `--ticker` widening).
 
 ### 2026-07-23 (evening) — Fresh-start v2 sim (full market + LLM) + explainable alert cards
 - **Fresh-start v2 simulation** (`docs/simulations/fresh-start-full-llm-2026-07-23.md`

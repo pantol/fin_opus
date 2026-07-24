@@ -347,6 +347,21 @@ CREATE TABLE IF NOT EXISTS intraday_alerts (
     created_at   TEXT NOT NULL,
     UNIQUE (position_id, session_date, state)
 );
+
+-- Scheduler journal (app/scheduler.py, `make daemon`): one row per fired job
+-- slot. The PRIMARY KEY is the idempotency guard — a slot claimed is a slot
+-- spent, so a daemon restart can never double-run a job. status: running /
+-- ok / failed / skipped (older missed every_min slot) / aborted (daemon died
+-- mid-run; jobs are idempotent and catch up at their next slot).
+CREATE TABLE IF NOT EXISTS schedule_runs (
+    job           TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,   -- ISO datetime with offset (Warsaw)
+    started_at    TEXT,
+    finished_at   TEXT,
+    status        TEXT NOT NULL,
+    detail        TEXT,
+    PRIMARY KEY (job, scheduled_for)
+);
 """
 
 

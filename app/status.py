@@ -130,6 +130,32 @@ def run_status(conn, backup_cfg: dict, *, now: datetime | None = None) -> Status
                 f"petla paper {behind} sesje w tyle "
                 f"(ostatnia rozliczona: {s['last_settled_date']})")
 
+    # --- scheduler journal (informational; the 19:45 health slot is the pager) ---
+    try:
+        latest = conn.execute(
+            "SELECT s.job, s.scheduled_for, s.status FROM schedule_runs s "
+            "JOIN (SELECT job, MAX(scheduled_for) AS m FROM schedule_runs "
+            "      GROUP BY job) t ON t.job = s.job AND t.m = s.scheduled_for "
+            "ORDER BY s.job",
+        ).fetchall()
+        if latest:
+            report.lines.append("scheduler: " + ", ".join(
+                f"{r['job']} {r['status']} @ {r['scheduled_for'][:16]}" for r in latest))
+            # The evening chain is the only decision point — a failed evening
+            # slot today must page even if everything else looks alive.
+            today = now.astimezone(timezone.utc).date().isoformat()
+            failed_evening = conn.execute(
+                "SELECT COUNT(*) FROM schedule_runs WHERE job = 'evening' "
+                "AND status = 'failed' AND scheduled_for >= ?",
+                (today,),
+            ).fetchone()[0]
+            if failed_evening:
+                report.stale.append("wieczorny przebieg decyzyjny NIEUDANY dzisiaj")
+        else:
+            report.lines.append("scheduler: no runs recorded (daemon not in use)")
+    except Exception:  # noqa: BLE001 — table may predate this feature
+        report.lines.append("scheduler: journal table missing")
+
     # --- newest local backup snapshot ---
     backups_dir = Path(backup_cfg.get("backups_dir", "data/backups"))
     names = sorted(p.name for p in backups_dir.glob("gpw-*.db")

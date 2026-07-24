@@ -1,0 +1,36 @@
+# Working-window scheduler (Stage 1 of docs/plan-window-7-19.md).
+#
+# One process (`make daemon`) reads this file and fires the EXISTING jobs at
+# their slots. The scheduler adds a clock, a journal and a morning digest —
+# ZERO decision changes: the only decision point remains the evening `signals`
+# run, exactly as when the jobs were fired from cron by hand.
+#
+# Semantics:
+#   - `every_min` jobs run only INSIDE the global window (and their own
+#     per-job `window`, when given), on the configured weekdays.
+#   - `at` jobs run at their wall-clock time on the configured weekdays —
+#     deliberately allowed OUTSIDE the window: GPW publishes the session file
+#     ~19:00, so the decision chain is anchored at 19:30 (do NOT move it
+#     earlier without empirical evidence of earlier publication).
+#   - A missed `at` slot (sleeping laptop) still fires later the same day;
+#     a missed `every_min` slot fires once (the latest one) — older missed
+#     slots are journaled as `skipped`, never silently dropped.
+
+window:
+  start: "07:00"
+  end: "19:00"
+  tz: Europe/Warsaw
+  days: [mon, tue, wed, thu, fri]
+
+# Seconds between scheduler wake-ups (slot resolution is 1 minute).
+tick_seconds: 30
+
+jobs:
+  - {name: collect,  every_min: 15}
+  - {name: intraday, every_min: 5, window: ["09:00", "17:10"]}
+  - {name: digest,   at: "07:30"}
+  # Anchored OUTSIDE the window on purpose (session file lands ~19:00).
+  # `llm` is an OPTIONAL step: its failure never blocks the deterministic
+  # `signals` decision (missing scores simply fail LLM-gated entries closed).
+  - {name: evening,  at: "19:30", chain: [ingest, llm, signals]}
+  - {name: health,   at: "19:45", chain: [status, backup]}

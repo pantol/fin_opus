@@ -441,6 +441,37 @@ Signal / fill / lapse cards are sent AFTER commit with at-least-once delivery
 portfolio-summary card is best-effort) — alerting can never touch money
 state. Cron example (Warsaw): `30 19 * * 1-5  cd /opt/fin_opus && make signals`.
 
+### 9. Working-window scheduler (`make daemon`)
+
+One process replaces the crontab (Stage 1 of `docs/plan-window-7-19.md`):
+`app/scheduler.py` reads `config/schedule.yaml` and fires the existing
+one-shot jobs at their slots — `collect` every 15 min and the intraday
+recorder/monitor every 5 min inside the 07:00–19:00 window, the Polish
+**morning digest** at 07:30 (positions vs stops, pending orders, fresh
+filings + LLM verdicts), the **evening decision chain** `ingest → llm →
+signals` at 19:30 (anchored outside the window on purpose — the GPW session
+file lands ~19:00), and `status → backup` at 19:45.
+
+Every fired slot is journaled in `schedule_runs` (visible in `make status`);
+the journal's primary key makes slots idempotent across restarts. A missed
+`at` slot (sleeping laptop) still fires later the same day; missed `every_min`
+slots collapse to the latest one, older ones are journaled `skipped`. A
+failing `llm` step never blocks `signals` (missing scores fail LLM-gated
+entries closed); a failing `ingest` stops the chain. The scheduler NEVER
+passes `--accept-config-change` — a config-fingerprint break always needs a
+human. Zero decision changes: the clock only runs the same commands you would
+run by hand.
+
+```bash
+make daemon                        # foreground (Ctrl-C to stop)
+python -m app.scheduler --once     # single pass: fire what is due, exit
+```
+
+To keep it running on a Mac, install the launchd unit (adjust paths inside
+first): `cp ops/pl.finopus.daemon.plist ~/Library/LaunchAgents/ && launchctl
+load ~/Library/LaunchAgents/pl.finopus.daemon.plist`. Caveat: a sleeping
+laptop skips slots (jobs catch up); a VPS is the long-term home.
+
 ## Project structure
 
 Visual map of the whole repo — architecture + daily-cycle Mermaid diagrams, DB

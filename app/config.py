@@ -91,3 +91,7 @@ def load_intraday_config() -> dict[str, Any]:
 
 def load_backup_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "backup.yaml")
+
+
+def load_schedule_config() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "schedule.yaml")

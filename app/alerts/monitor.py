@@ -17,6 +17,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.alerts import telegram
+from app.paper.store import PAPER_PREFIX
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -39,23 +40,35 @@ def check_positions(
     near_pct: float = 0.02,
     send_fn=telegram.send_text,
     now: datetime | None = None,
+    user_id: str | None = None,
 ) -> list[dict]:
-    """One monitor pass over all OPEN positions. Returns the warnings raised.
+    """One monitor pass over OPEN paper positions. Returns the warnings raised.
 
     A warning fires once per (position, session, state): NEAR_STOP when the
     latest delayed price sits within `near_pct` above the stop, STOP_BREACH
     when it is at/below the stop. No state, no price, no position is ever
     modified here.
+
+    Scoping: only `paper:` books are ever monitored (a backtest persisting
+    positions under another user_id must not produce phantom cards).
+    `user_id` narrows the pass to ONE paper book; None watches every book —
+    per-user alert ROUTING stays a later concern, the filter exists now so a
+    second user never silently widens this query.
     """
     now = now or datetime.now(WARSAW)
     session_date = now.date().isoformat()
     warnings: list[dict] = []
-    rows = conn.execute(
-        "SELECT p.id, p.instrument_id, p.qty, p.stop_price, i.ticker "
+    sql = (
+        "SELECT p.id, p.instrument_id, p.qty, p.stop_price, p.user_id, i.ticker "
         "FROM positions p JOIN instruments i ON i.id = p.instrument_id "
         "WHERE p.status = 'OPEN' AND p.stop_price IS NOT NULL "
-        "ORDER BY i.ticker",
-    ).fetchall()
+        "AND p.user_id LIKE ?"
+    )
+    params: list = [PAPER_PREFIX + "%"]
+    if user_id is not None:
+        sql += " AND p.user_id = ?"
+        params.append(user_id)
+    rows = conn.execute(sql + " ORDER BY i.ticker", params).fetchall()
     for pos in rows:
         bar = latest_intraday(conn, pos["instrument_id"])
         if bar is None or bar["bar_start"][:10] != session_date:
@@ -79,7 +92,7 @@ def check_positions(
         warning = {
             "state": state, "ticker": pos["ticker"], "price": price,
             "stop_price": stop, "qty": int(pos["qty"]),
-            "bar_start": bar["bar_start"],
+            "bar_start": bar["bar_start"], "user_id": pos["user_id"],
         }
         warnings.append(warning)
         if send_fn is not None:

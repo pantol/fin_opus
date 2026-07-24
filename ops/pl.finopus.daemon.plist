@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd unit for the fin_opus working-window scheduler (make daemon).
+
+  NOT installed automatically. To install (adjust the repo path first):
+
+    cp ops/pl.finopus.daemon.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/pl.finopus.daemon.plist
+
+  To stop:  launchctl unload ~/Library/LaunchAgents/pl.finopus.daemon.plist
+
+  Caveat (documented in docs/plan-window-7-19.md): a sleeping laptop skips
+  slots. Jobs are idempotent and catch up at the next slot; a VPS is the
+  long-term home. KeepAlive restarts the daemon if it crashes; the pidfile
+  guard inside the daemon prevents accidental double-clocks.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>pl.finopus.daemon</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/kamilpantak/funn/fin_opus</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/kamilpantak/funn/fin_opus/.venv/bin/python</string>
+    <string>-m</string>
+    <string>app.scheduler</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/kamilpantak/funn/fin_opus/data/daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/kamilpantak/funn/fin_opus/data/daemon.log</string>
+</dict>
+</plist>

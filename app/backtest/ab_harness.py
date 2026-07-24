@@ -115,14 +115,14 @@ def run_ab(
     # by llm_score too, and starving it of scores would make the A/B compare
     # "gate + different ranking inputs" instead of the gate alone.
     base_instruments = (engine.attach_llm_scores(conn, instruments)
-                        if engine.strategy_uses_llm_features(baseline_cfg)
+                        if engine.needs_llm_attach(baseline_cfg, bt_cfg)
                         else instruments)
     base_res = engine.run_walk_forward(
         base_instruments, bench_close, copy.deepcopy(baseline_cfg), bt_cfg,
         membership=membership,
     )
     llm_instruments = (engine.attach_llm_scores(conn, instruments)
-                       if engine.strategy_uses_llm_features(llm_cfg)
+                       if engine.needs_llm_attach(llm_cfg, bt_cfg)
                        else instruments)
     llm_res = engine.run_walk_forward(
         llm_instruments, bench_close, copy.deepcopy(llm_cfg), bt_cfg,

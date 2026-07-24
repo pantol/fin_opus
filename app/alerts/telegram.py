@@ -143,6 +143,30 @@ def format_llm_radar_pl(*, date: str, permits: list, vetoes: list,
     return "\n".join(lines)
 
 
+def format_regime_radar_pl(flip: dict) -> str:
+    """Regime state-flip card (Phase 3 radar). Output-only: rendered AFTER the
+    deterministic decide; the regime never sizes, never sets stops."""
+    c = flip.get("components") or {}
+    if flip["to_state"] == "risk_off":
+        head = "🛰️ Radar rynku: przelaczenie na RISK-OFF"
+        tail = ("Strategie z bramka rezimu wstrzymuja NOWE wejscia; "
+                "stopy i wyjscia dzialaja bez zmian.")
+    else:
+        head = "🛰️ Radar rynku: powrot do RISK-ON"
+        tail = "Strategie z bramka rezimu znow dopuszczaja nowe wejscia."
+    lines = [
+        head,
+        f"Sesja: {flip['date']}",
+        f"Skladowa ryzyka: {flip['score']:+.2f} "
+        f"(trend {c.get('trend', 0):+.2f}, szerokosc {c.get('breadth', 0):+.2f}, "
+        f"zmiennosc {c.get('vol', 0):+.2f}, obsuniecie {c.get('drawdown', 0):+.2f}, "
+        f"LLM {c.get('llm', 0):+.2f})",
+        tail,
+        "Informacja pogladowa — wszystkie decyzje pozostaja deterministyczne.",
+    ]
+    return "\n".join(lines)
+
+
 def format_order_outcome_pl(order: dict) -> str:
     """Fill / partial-fill / lapse card for a settled order."""
     ticker = order.get("ticker", "?").upper()

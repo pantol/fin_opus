@@ -382,6 +382,17 @@ def run_backtest(
     atr_mult = float(risk_cfg["atr_mult_stop"])
     liq_gate = liquidity_gate(bt_cfg)
     rank_spec = entry_ranking_spec(strategy_cfg)  # validated once, up front
+    # Market-regime features (Phase 3): computed HERE, deterministically, over
+    # the full loaded history (each row uses only data <= its date, so passing
+    # the whole frame is point-in-time safe; warmup rows are absent and fail
+    # entry conditions closed). Only strategies that reference market_*
+    # features pay the cost — and only they see the injected keys, so
+    # baseline snapshots stay byte-identical.
+    market_features = None
+    if strategy_uses_market_features(strategy_cfg):
+        from app.features import regime as regime_mod
+        market_features = regime_mod.compute_market_features(
+            instruments, benchmark_close, bt_cfg)
     views = build_feature_views(instruments)
 
     calendar = _trading_calendar(instruments)
@@ -492,6 +503,10 @@ def run_backtest(
         # but the entry order. Without entry_ranking the candidate list keeps
         # the sweep order (instrument id) — the legacy behavior.
         day_ns = int(day.value)
+        market_snap = None
+        if market_features is not None:
+            from app.features import regime as regime_mod
+            market_snap = regime_mod.frame_asof(market_features, day)
         entry_candidates: list[tuple[Instrument, dict, float, float]] = []
         for inst in instruments:
             if not _alive(inst, day):
@@ -530,6 +545,9 @@ def run_backtest(
             llm_relevance = _series_asof(inst.llm_relevance, day)
             if llm_relevance is not None:
                 snap["llm_relevance"] = llm_relevance
+            # Market regime as plain features (same day for every instrument).
+            if market_snap:
+                snap.update(market_snap)
 
             pos = positions.get(inst.ticker)
             ctx = EvalContext(
@@ -866,6 +884,38 @@ def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
 
     return (_walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
             or _walk(strategy_cfg.get("entry_ranking")))
+
+
+def strategy_uses_market_features(strategy_cfg: dict) -> bool:
+    """True if any condition or ranking key references a `market_*` regime
+    feature (market_risk_score, market_risk_on, ...). Decides whether the
+    engine computes+injects the market-regime frame — strategies that never
+    mention it keep byte-identical snapshots."""
+    def _walk(node) -> bool:
+        if isinstance(node, dict):
+            feat = node.get("feature")
+            if isinstance(feat, str) and feat.startswith("market_"):
+                return True
+            return any(_walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_walk(v) for v in node)
+        return False
+
+    return (_walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+            or _walk(strategy_cfg.get("entry_ranking")))
+
+
+def needs_llm_attach(strategy_cfg: dict, bt_cfg: dict) -> bool:
+    """True when materialized llm_scores must be attached before running this
+    strategy: it gates/ranks on llm_* directly, OR it uses market_* features
+    and the regime model's llm component carries weight (a regime computed
+    without attached verdicts would silently read neutral)."""
+    if strategy_uses_llm_features(strategy_cfg):
+        return True
+    if strategy_uses_market_features(strategy_cfg):
+        from app.features import regime as regime_mod
+        return regime_mod.needs_llm(bt_cfg)
+    return False
 
 
 # Backwards-compatible aliases (pre-Pack-D names).

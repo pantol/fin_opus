@@ -31,6 +31,7 @@ from app.ingestion import provenance
 from app.logging import decisions as declog
 from app.paper import store
 from app.risk import manager as risk
+from app.features import regime as regime_mod
 from app.strategy.engine import (EvalContext, Signal, entry_rank_key,
                                  entry_ranking_spec, evaluate,
                                  strip_llm_conditions)
@@ -66,6 +67,8 @@ class PaperRunReport:
     dry_run: bool = False
     sessions: list[SessionResult] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Regime radar state flip on the last processed session (display only).
+    regime_flip: dict | None = None
 
     def as_text(self) -> str:
         lines = [f"paper[{self.user_id}]: {self.status}"
@@ -115,6 +118,12 @@ def config_hash(strategy_cfg: dict, bt_cfg: dict, universe: dict) -> str:
         # done, so it must break the track record explicitly.
         "universe_cfg": bt_cfg.get("universe"),
     }
+    # The regime model shapes decisions ONLY for strategies that gate on
+    # market_* features — include its EFFECTIVE config (defaults merged) for
+    # exactly those, so a regime retune breaks their track record explicitly
+    # while regime-blind books stay unaffected.
+    if engine.strategy_uses_market_features(strategy_cfg):
+        payload["regime"] = regime_mod.regime_config(bt_cfg)
     # default=str: PyYAML parses unquoted ISO dates (universe listed_from/
     # listed_to) into datetime.date; hash them as their ISO text, matching
     # validation.config_hash. Identical output for date-free payloads.
@@ -185,13 +194,15 @@ def run_signals(
     # --- load the exact universe/feature pipeline the backtest uses ----------
     bench = universe["benchmark"]["ticker"]
     mode = engine.universe_mode(bt_cfg)
-    instruments, _bench_close = engine.load_instruments(conn, universe, bench,
-                                                        mode=mode)
+    instruments, bench_close = engine.load_instruments(conn, universe, bench,
+                                                       mode=mode)
     if not instruments:
         report.reason = "no price data — run `make ingest` first"
         _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
-    if engine.strategy_uses_llm_features(strategy_cfg):
+    radar_enabled = bool(regime_mod.regime_config(bt_cfg)["radar"]["enabled"])
+    if engine.needs_llm_attach(strategy_cfg, bt_cfg) or (
+            radar_enabled and regime_mod.needs_llm(bt_cfg)):
         # Reads pre-materialized llm_features rows; NO LLM call happens here.
         instruments = engine.attach_llm_scores(conn, instruments)
 
@@ -329,6 +340,15 @@ def run_signals(
     views = engine.build_feature_views(instruments)
     liq_gate = engine.liquidity_gate(bt_cfg)
     rank_spec = entry_ranking_spec(strategy_cfg)
+    # Market-regime features (Phase 3). Injected into decision snapshots ONLY
+    # when the strategy references market_* (byte-parity with the backtest);
+    # computed regardless when the radar card is enabled, purely for the
+    # informational state-flip card after commit.
+    uses_market = engine.strategy_uses_market_features(strategy_cfg)
+    market_features = None
+    if uses_market or radar_enabled:
+        market_features = regime_mod.compute_market_features(
+            instruments, bench_close, bt_cfg)
 
     try:
         for day in todo:
@@ -366,6 +386,7 @@ def run_signals(
                 costs=costs, atr_mult=atr_mult, cash=cash, peak_equity=peak_equity,
                 warnings=report.warnings, views=views, liq_gate=liq_gate,
                 rank_spec=rank_spec,
+                market_features=market_features if uses_market else None,
             )
             store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
                              last_settled_date=day.date().isoformat())
@@ -382,15 +403,38 @@ def run_signals(
         conn.rollback()
 
     report.status = "ok"
+    # Regime state-flip card (display only, after all money commits): compare
+    # the radar state on the last processed session vs the session before it.
+    if market_features is not None and report.sessions:
+        report.regime_flip = _regime_flip(
+            market_features, pd.to_datetime(report.sessions[-1].date))
     if not dry_run:
         _flush_alerts(conn, user_id, send_fn, report)
     return EXIT_OK, report
 
 
+def _regime_flip(market_features, day) -> dict | None:
+    """{date, to_state, score, components} when the risk state flipped ON the
+    session `day` (vs the prior feature row); None otherwise."""
+    feats = market_features[market_features.index <= day]
+    if len(feats) < 2:
+        return None
+    cur, prev = feats.iloc[-1], feats.iloc[-2]
+    if cur["market_risk_on"] == prev["market_risk_on"]:
+        return None
+    return {
+        "date": feats.index[-1].date().isoformat(),
+        "to_state": "risk_on" if cur["market_risk_on"] else "risk_off",
+        "score": float(cur["market_risk_score"]),
+        "components": {k: float(cur[f"market_{k}"]) for k in
+                       ("trend", "breadth", "vol", "drawdown", "llm")},
+    }
+
+
 def _process_session(
     conn, *, day, prev_day, user_id, strategy_id, instruments, inst_by_ticker,
     inst_by_id, membership, strategy_cfg, risk_cfg, costs, atr_mult, cash,
-    peak_equity, warnings, views, liq_gate, rank_spec,
+    peak_equity, warnings, views, liq_gate, rank_spec, market_features=None,
 ) -> tuple[float, float, SessionResult]:
     """Settle -> mark -> decide for one session, mirroring the engine loop."""
     day_iso = day.date().isoformat()
@@ -575,6 +619,8 @@ def _process_session(
     llm_vetoes: list[tuple] = []
     llm_no_score = 0
     day_ns = int(day.value)
+    market_snap = (regime_mod.frame_asof(market_features, day)
+                   if market_features is not None else None)
     entry_candidates: list[tuple] = []  # (inst, snap, close, atr_val)
     for inst in instruments:
         if not engine._alive(inst, day):
@@ -604,6 +650,8 @@ def _process_session(
         llm_relevance = engine._series_asof(inst.llm_relevance, day)
         if llm_relevance is not None:
             snap["llm_relevance"] = llm_relevance
+        if market_snap:
+            snap.update(market_snap)  # engine step-3 parity (market_* features)
 
         pos = positions.get(inst.ticker)
         ctx = EvalContext(
@@ -759,6 +807,8 @@ def _flush_alerts(conn, user_id: str, send_fn, report: PaperRunReport) -> None:
                 send_fn(telegram.format_llm_radar_pl(
                     date=last.date, permits=r["permits"], vetoes=r["vetoes"],
                     no_score=r["no_score"]))
+            if report.regime_flip is not None:
+                send_fn(telegram.format_regime_radar_pl(report.regime_flip))
             send_fn(telegram.format_paper_summary_pl(
                 date=last.date, equity=last.equity, cash=last.cash,
                 n_open=last.n_open, n_candidates=last.n_entry_candidates,

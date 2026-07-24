@@ -227,10 +227,11 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
-    # If the strategy gates on any llm_* feature, attach point-in-time LLM
+    # If the strategy gates on any llm_* feature — or uses market_* regime
+    # features whose llm component carries weight — attach point-in-time LLM
     # features (materialized earlier; read deterministically, NO LLM call).
     # Otherwise the gate would never see a value and silently block every entry.
-    if engine.strategy_uses_llm_features(strat):
+    if engine.needs_llm_attach(strat, bt_cfg):
         instruments = engine.attach_llm_scores(conn, instruments)
         with_scores = sum(
             1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
@@ -763,6 +764,59 @@ def cmd_signals(args) -> int:
     return code
 
 
+def cmd_regime(args) -> int:
+    """Market-regime radar report (Phase 3; display only, ZERO decisions).
+
+    Prints today's deterministic risk score + components, the recent state
+    flips, and the retrospective false-alarm scoreboard (which risk-off
+    switches the benchmark later justified). The forward-looking judgment
+    lives ONLY in this report — never in any feature or decision."""
+    from app.features import regime as regime_mod
+
+    conn = connect(args.db)
+    init_db(conn)
+    universe = cfg.load_universe()
+    bt_cfg = cfg.load_backtest_config()
+    instruments, bench_close = engine.load_instruments(
+        conn, universe, universe["benchmark"]["ticker"],
+        mode=engine.universe_mode(bt_cfg))
+    if not instruments:
+        print("No price data. Run `make ingest` first.")
+        conn.close()
+        return 1
+    if regime_mod.needs_llm(bt_cfg):
+        instruments = engine.attach_llm_scores(conn, instruments)
+    feats = regime_mod.compute_market_features(instruments, bench_close, bt_cfg)
+    conn.close()
+    if feats.empty:
+        print("Not enough benchmark history to compute the regime (SMA warmup).")
+        return 1
+    last = feats.iloc[-1]
+    state = "RISK-ON" if last["market_risk_on"] else "RISK-OFF"
+    print(f"Regime as of {feats.index[-1].date().isoformat()}: {state} "
+          f"(score {last['market_risk_score']:+.3f})")
+    print(f"  components: trend {last['market_trend']:+.3f}, "
+          f"breadth {last['market_breadth']:+.3f}, vol {last['market_vol']:+.3f}, "
+          f"drawdown {last['market_drawdown']:+.3f}, llm {last['market_llm']:+.3f}")
+    flips = regime_mod.switches(feats)
+    print(f"\nState flips: {len(flips)} total; last 10:")
+    for sw in flips[-10:]:
+        print(f"  {sw['date']}: -> {sw['to_state']} (score {sw['score']:+.3f})")
+    rep = regime_mod.false_alarm_report(feats, bench_close, bt_cfg)
+    rate = ("n/a (no fully elapsed risk-off switches)"
+            if rep["false_alarm_rate"] is None
+            else f"{rep['false_alarm_rate']:.0%} ({rep['n_false']}/{rep['n_judged']})")
+    print(f"\nFalse-alarm report (risk-off unjustified unless the benchmark "
+          f"fell <= -{rep['dd_threshold']:.0%} within {rep['horizon_sessions']} "
+          f"sessions): {rate}")
+    for e in rep["risk_off_switches"][-10:]:
+        verdict = "FALSE ALARM" if e["false_alarm"] else "justified"
+        print(f"  {e['date']}: fwd min {e['fwd_min_return']:+.1%} -> {verdict}")
+    if rep["pending"]:
+        print(f"  pending (horizon not elapsed): {len(rep['pending'])}")
+    return 0
+
+
 def cmd_web(args) -> int:
     """Serve the read-only per-user dashboard. Display layer only: the SQLite
     connection is opened mode=ro, so this process cannot touch money state."""
@@ -909,6 +963,10 @@ def main(argv=None) -> int:
                      help="Bind address (default: local only)")
     web.add_argument("--port", type=int, default=8765)
 
+    sub.add_parser("regime",
+                   help="Market-regime radar: current state, flips, "
+                        "false-alarm report (display only)")
+
     args = parser.parse_args(argv)
     if args.command == "ingest":
         return cmd_ingest(args)
@@ -942,6 +1000,8 @@ def main(argv=None) -> int:
         return cmd_signals(args)
     if args.command == "web":
         return cmd_web(args)
+    if args.command == "regime":
+        return cmd_regime(args)
     return 1
 
 

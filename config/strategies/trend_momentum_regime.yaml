@@ -1,0 +1,50 @@
+# Trend + momentum WITH the Phase-3 market-regime gate. Identical risk/exit
+# and entry ranking to the baseline (trend_momentum.yaml); the ONLY difference
+# is one extra entry condition on `market_risk_on` — the hysteresis-filtered
+# deterministic regime state (app/features/regime.py, params under `regime:`
+# in backtest.yaml).
+#
+# The gate can only BLOCK new entries in a risk-off market; it never sizes,
+# never sets stops, and exits always evaluate — held positions still trail
+# their ATR stops and leave on trend breaks regardless of the regime.
+
+name: trend_momentum_regime
+version: 1
+
+entry:
+  all:
+    - feature: close_vs_sma200
+      op: gt
+      value: 0.0
+    - feature: momentum_6m
+      op: gt
+      value: 0.0
+    - feature: market_risk_on   # 1.0 risk-on / 0.0 risk-off (hysteresis state)
+      op: gte
+      value: 1.0
+
+# Same cross-sectional entry ordering as the baseline (v2) so any A/B against
+# it compares the regime GATE, not two different orderings.
+entry_ranking:
+  - feature: llm_score
+    order: desc
+  - feature: momentum_6m
+    order: desc
+
+# Exit: identical to baseline (ATR trailing stop OR trend break).
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: close_vs_sma200
+      op: lt
+      value: 0.0
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

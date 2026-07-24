@@ -31,7 +31,9 @@ from app.ingestion import provenance
 from app.logging import decisions as declog
 from app.paper import store
 from app.risk import manager as risk
-from app.strategy.engine import EvalContext, Signal, evaluate, strip_llm_conditions
+from app.strategy.engine import (EvalContext, Signal, entry_rank_key,
+                                 entry_ranking_spec, evaluate,
+                                 strip_llm_conditions)
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -321,9 +323,12 @@ def run_signals(
     costs = bt_cfg["costs"]
     risk_cfg = strategy_cfg["risk"]
     atr_mult = float(risk_cfg["atr_mult_stop"])
-    # Same fast feature views + entry gate the backtest engine uses (parity).
+    # Same fast feature views + entry gate + entry ranking the backtest engine
+    # uses (parity). Parsing the ranking here also validates it before any
+    # session is processed.
     views = engine.build_feature_views(instruments)
     liq_gate = engine.liquidity_gate(bt_cfg)
+    rank_spec = entry_ranking_spec(strategy_cfg)
 
     try:
         for day in todo:
@@ -360,6 +365,7 @@ def run_signals(
                 membership=membership, strategy_cfg=strategy_cfg, risk_cfg=risk_cfg,
                 costs=costs, atr_mult=atr_mult, cash=cash, peak_equity=peak_equity,
                 warnings=report.warnings, views=views, liq_gate=liq_gate,
+                rank_spec=rank_spec,
             )
             store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
                              last_settled_date=day.date().isoformat())
@@ -384,7 +390,7 @@ def run_signals(
 def _process_session(
     conn, *, day, prev_day, user_id, strategy_id, instruments, inst_by_ticker,
     inst_by_id, membership, strategy_cfg, risk_cfg, costs, atr_mult, cash,
-    peak_equity, warnings, views, liq_gate,
+    peak_equity, warnings, views, liq_gate, rank_spec,
 ) -> tuple[float, float, SessionResult]:
     """Settle -> mark -> decide for one session, mirroring the engine loop."""
     day_iso = day.date().isoformat()
@@ -557,8 +563,10 @@ def _process_session(
                                   stop_price=pos.stop_price)
 
     # --- 3. decide on today's close; orders fill at the NEXT session's open ---
-    # Mirrors the engine's step-3 loop exactly (fast views + entry gate) so
-    # paper decisions stay byte-compatible with backtest decisions.
+    # Mirrors the engine's step-3 loop exactly (fast views + entry gate +
+    # ranked entries) so paper decisions stay byte-compatible with backtest
+    # decisions: the sweep queues EXITs immediately and collects entry
+    # candidates; sizing runs afterwards in `entry_ranking` order.
     # The llm-radar bookkeeping below is OUTPUT-only telemetry: it re-reads
     # the same snapshots after the signal is already decided.
     uses_llm = engine.strategy_uses_llm_features(strategy_cfg)
@@ -567,6 +575,7 @@ def _process_session(
     llm_vetoes: list[tuple] = []
     llm_no_score = 0
     day_ns = int(day.value)
+    entry_candidates: list[tuple] = []  # (inst, snap, close, atr_val)
     for inst in instruments:
         if not engine._alive(inst, day):
             continue
@@ -625,28 +634,7 @@ def _process_session(
             atr_val = snap.get("atr")
             if not atr_val:
                 continue
-            sizing = risk.size_position(
-                entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
-                ticker=inst.ticker, sector=inst.sector,
-            )
-            if not sizing.accepted:
-                continue
-            store.insert_order(conn, user_id, instrument_id=inst.instrument_id,
-                               side="BUY", qty=sizing.qty, stop_price=sizing.stop_price,
-                               decision_date=day_iso, features=snap)
-            pending_buys[inst.ticker] = {"side": "BUY", "ticker": inst.ticker,
-                                         "qty": sizing.qty}
-            session.new_orders.append({"ticker": inst.ticker, "side": "BUY",
-                                       "qty": sizing.qty,
-                                       "stop_price": sizing.stop_price})
-            # reserve exposure within the same day to avoid over-allocating
-            est_cost = close * sizing.qty
-            state.exposure_by_name[inst.ticker] = (
-                state.exposure_by_name.get(inst.ticker, 0.0) + est_cost)
-            if inst.sector is not None:
-                state.exposure_by_sector[inst.sector] = (
-                    state.exposure_by_sector.get(inst.sector, 0.0) + est_cost)
-            state.open_positions += 1
+            entry_candidates.append((inst, snap, close, atr_val))
 
         elif sig == Signal.EXIT and in_pos and not has_pending_sell:
             store.insert_order(conn, user_id, instrument_id=inst.instrument_id,
@@ -655,6 +643,34 @@ def _process_session(
             pending_sells.add(inst.ticker)
             session.new_orders.append({"ticker": inst.ticker, "side": "SELL",
                                        "qty": pos.qty, "stop_price": None})
+
+    # --- 3b. size ranked entry candidates (engine step-3b parity) -------------
+    if rank_spec:
+        # Stable sort: candidates tied on every key keep instrument order.
+        entry_candidates.sort(key=lambda c: entry_rank_key(rank_spec, c[1]))
+    for inst, snap, close, atr_val in entry_candidates:
+        sizing = risk.size_position(
+            entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
+            ticker=inst.ticker, sector=inst.sector,
+        )
+        if not sizing.accepted:
+            continue
+        store.insert_order(conn, user_id, instrument_id=inst.instrument_id,
+                           side="BUY", qty=sizing.qty, stop_price=sizing.stop_price,
+                           decision_date=day_iso, features=snap)
+        pending_buys[inst.ticker] = {"side": "BUY", "ticker": inst.ticker,
+                                     "qty": sizing.qty}
+        session.new_orders.append({"ticker": inst.ticker, "side": "BUY",
+                                   "qty": sizing.qty,
+                                   "stop_price": sizing.stop_price})
+        # reserve exposure within the same day to avoid over-allocating
+        est_cost = close * sizing.qty
+        state.exposure_by_name[inst.ticker] = (
+            state.exposure_by_name.get(inst.ticker, 0.0) + est_cost)
+        if inst.sector is not None:
+            state.exposure_by_sector[inst.sector] = (
+                state.exposure_by_sector.get(inst.sector, 0.0) + est_cost)
+        state.open_positions += 1
 
     session.equity = equity
     session.cash = cash

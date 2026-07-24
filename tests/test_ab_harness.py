@@ -93,8 +93,13 @@ def test_negative_llm_score_blocks_entries_positive_permits():
 def test_strategy_uses_llm_score_detection():
     base = cfg.load_strategy("trend_momentum")
     llm = cfg.load_strategy("trend_momentum_llm")
-    assert engine.strategy_uses_llm_score(base) is False
+    # Since v2 BOTH configs reference llm_score — the llm variant gates on it,
+    # the baseline ranks entries by it — so both get scores attached.
+    assert engine.strategy_uses_llm_score(base) is True
     assert engine.strategy_uses_llm_score(llm) is True
+    # Without the ranking, the baseline's rules alone are LLM-free.
+    no_ranking = {k: v for k, v in base.items() if k != "entry_ranking"}
+    assert engine.strategy_uses_llm_score(no_ranking) is False
 
 
 def test_attach_llm_scores_loads_materialized_features():

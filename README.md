@@ -764,15 +764,23 @@ vs **WIG20TR +147%** — much lower drawdown, far lower return. The plumbing is
 sound; the strategy has no proven edge yet. The A/B LLM comparison needs weeks
 of collected filings before it can say anything (RSS has no backfill).
 
-## Seams for later phases (not built yet)
+## Remaining seams (deliberately not built)
 
-- **Walk-forward parameter fitting** — the IS/OOS machinery exists but Phase-1
-  parameters are fixed constants, so fitting is currently a documented no-op.
-- **Adjusted-price features** — the adjusted series is derived (`make refdata`)
-  but features still read raw prices; switching them is a one-line change with
-  system-wide metric consequences, deferred deliberately.
-- **Phase 3 — regime radar / turning points. Phase 4 — academic strategies
-  (more YAMLs; same engine). Phase 5 — survey/profile. Phase 6 — multi-tenant
-  auth** (the `user_id` column already threads everywhere).
+All blueprint phases (0–6) are implemented — regime radar (`cli regime`),
+strategy library (`docs/strategy-library.md`), profiles (`cli survey`),
+multi-tenant books (`signals --user / --all-users`), and the window-plan
+Stage-1 scheduler (`make daemon`). What stays a documented seam:
+
+- **Walk-forward parameter fitting** — the IS/OOS machinery exists but
+  strategy parameters are fixed constants, so fitting is a documented no-op.
+- **Adjusted-price features** — the adjusted series is derived
+  (`make refdata`) but features still read raw prices; a one-line switch
+  with system-wide metric consequences, deferred deliberately.
+- **Postgres/TimescaleDB + queue** — the schema is portable by design;
+  migration waits for a real need (simple-monolith rule).
+- **Intraday decisions** (window-plan Stage 4) — gated on weeks of recorded
+  5-minute bars plus an intraday backtest with the 15-min-delay fill model.
+- **LLM PDF→spec strategy drafts** — the YAML DSL is the contract; a draft
+  generator changes nothing about the validation gate.
 
 **Real/live trading is forbidden — paper only.**

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Makieta alertów Telegram — GPW paper, dzień 8 (symulacja)</title>
+<style>
+  :root {
+    --bg: #0e1621; --panel: #17212b; --panel-2: #1e2c3a;
+    --bubble: #182533; --bubble-border: #22303e;
+    --text: #e7edf2; --muted: #7f91a4; --accent: #5eb5f7;
+    --green: #6ecb81; --amber: #e8b357; --red: #e07a6a; --divider: #24303c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 24px 16px 48px; }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; font-weight: 650; }
+  .sub { color: var(--muted); margin-top: 4px; font-size: .92rem; }
+  .badge { display: inline-block; margin-top: 10px; padding: 3px 10px;
+    border: 1px solid var(--amber); color: var(--amber); border-radius: 999px;
+    font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; }
+  .cols { display: grid; grid-template-columns: minmax(320px, 1fr) 440px; gap: 28px; margin-top: 26px; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--divider); border-radius: 14px; padding: 20px 22px; align-self: start; }
+  .panel h2 { font-size: 1.02rem; margin-bottom: 14px; color: var(--accent); }
+  table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+  th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--divider); font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; border-top: 0; }
+  td.num, th.num { text-align: right; }
+  .up { color: var(--green); }
+  .out { color: var(--red); }
+  .dim { color: var(--muted); }
+  .note { margin-top: 16px; padding: 12px 14px; border-left: 3px solid var(--green);
+    background: var(--panel-2); border-radius: 8px; font-size: .88rem; color: #c7d3de; }
+  .note b { color: var(--green); }
+  .note.amber { border-color: var(--amber); }
+  .note.amber b { color: var(--amber); }
+  .note.red { border-color: var(--red); }
+  .note.red b { color: var(--red); }
+  .phone { background: var(--panel); border: 1px solid var(--divider); border-radius: 18px; overflow: hidden; }
+  .chat-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    background: var(--panel-2); border-bottom: 1px solid var(--divider); }
+  .avatar { width: 40px; height: 40px; border-radius: 50%; flex: none;
+    background: linear-gradient(135deg, #2b5876, #4e4376);
+    display: flex; align-items: center; justify-content: center; font-size: 20px; }
+  .chat-title { font-weight: 650; font-size: .98rem; }
+  .chat-status { color: var(--muted); font-size: .8rem; }
+  .chat { padding: 14px 12px 20px; display: flex; flex-direction: column; gap: 8px; }
+  .day-chip { align-self: center; margin: 10px 0 4px; padding: 3px 12px;
+    background: rgba(0,0,0,.35); color: #aebfce; border-radius: 999px; font-size: .78rem; }
+  .msg { max-width: 88%; align-self: flex-start; background: var(--bubble);
+    border: 1px solid var(--bubble-border); border-radius: 4px 14px 14px 14px;
+    padding: 8px 12px 6px; white-space: pre-line; font-size: .9rem; }
+  .msg .t { display: block; text-align: right; color: var(--muted); font-size: .72rem;
+    margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .sys { align-self: center; color: var(--muted); font-size: .78rem; font-style: italic;
+    text-align: center; max-width: 90%; }
+  .foot { margin-top: 26px; color: var(--muted); font-size: .84rem; line-height: 1.6; }
+  .foot code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-size: .82rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📈 GPW paper trading — dzień 8 symulacji (sesja 23.07.2026)</h1>
+  <div class="sub">Ciąg dalszy <a href="day-07-2026-07-22-telegram-mockup.html">dnia 7</a>: pierwszy czerwony dzień po trzech zielonych — a Orlen w dniu ogłoszenia odpisu 1,9 mld zł rośnie +2,62% i podciąga swój stop do 148,08, głębiej w strefę zabezpieczonego zysku. Zero nowych sygnałów.</div>
+  <span class="badge">Makieta · symulacja · paper only</span>
+
+  <div class="cols">
+    <div>
+      <div class="panel">
+        <h2>Portfel po czwartkowej sesji</h2>
+        <table>
+          <tr><th>Pozycja</th><th class="num">Szt.</th><th class="num">Wejście</th><th class="num">Stop</th><th class="num">Dzień</th></tr>
+          <tr><td>PKO BP</td><td class="num">178</td><td class="num">111,22</td><td class="num">106,34</td><td class="num out">−1,20%</td></tr>
+          <tr><td>Orlen</td><td class="num">99</td><td class="num">144,29</td><td class="num up">148,08 ↑ ★</td><td class="num up">+2,62%</td></tr>
+          <tr><td>KGHM</td><td class="num">28</td><td class="num">308,92</td><td class="num">287,59</td><td class="num out">−3,97%</td></tr>
+          <tr><td>Orange Polska</td><td class="num">815</td><td class="num">14,76</td><td class="num">13,94</td><td class="num out">−1,19%</td></tr>
+          <tr><td>PZU</td><td class="num">279</td><td class="num">69,24</td><td class="num up">67,47 ↑</td><td class="num out">−1,94%</td></tr>
+          <tr><td>Santander</td><td class="num">1</td><td class="num">676,35</td><td class="num">632,20</td><td class="num out">−0,79%</td></tr>
+          <tr><td>Pekao</td><td class="num">67</td><td class="num">234,57</td><td class="num up">221,95 ↑</td><td class="num out">−1,31%</td></tr>
+          <tr><td>Alior</td><td class="num">27</td><td class="num">138,23</td><td class="num">128,49</td><td class="num out">−2,09%</td></tr>
+          <tr><td class="dim">oczekujące: brak</td><td class="num dim" colspan="4">gotówka: 4 453,60 zł (~4,5%)</td></tr>
+        </table>
+        <div class="note"><b>Paradoks Orlenu — tekst kontra taśma:</b> spółka zaraportowała dziś odpis 1,9 mld zł (warstwa LLM w księgach fresh-start oceniła go na −0,65 i zawetowała WEJŚCIE), a kurs wzrósł +2,62% do 155,86 — jedyna zielona pozycja dnia (+394 zł). Trailing stop podciągnął się 144,51 → <b>148,08</b>, już +2,6% NAD wejściem 144,29. Ta księga trzyma PKN od 14.07 — o wyjściu decyduje wyłącznie stop, nie nagłówek. ★ jedyny stop, który dziś się przesunął.</div>
+        <div class="note red"><b>Pierwszy czerwony dzień po trzech zielonych:</b> WIG20TR −1,13%, portfel −1,01% (−1 004,88 zł). Najsłabszy KGHM: −3,97%, zamknięcie dokładnie na minimum sesji (302,00) — wciąż ~4,8% nad stopem 287,59. Momentum 6M PZU spadło dziś pod zero, ale to reguła WEJŚCIA — wyjścia obsługują tylko ATR-stop i SMA200, żaden się nie odpalił.</div>
+        <div class="note amber"><b>Trzecie zero-aktywne popołudnie</b> (po dniach 3 i 7): pełne zaangażowanie 8/8, pusta kolejka, brak nowych kwalifikacji. Stopy robią robotę.</div>
+        <div class="note"><b>Od startu:</b> −1,45% vs benchmark +0,32% — luka zwęża się do −1,77 pp (z −1,90 pp), bo benchmark spadł mocniej niż portfel.</div>
+      </div>
+    </div>
+
+    <div class="phone">
+      <div class="chat-header">
+        <div class="avatar">📈</div>
+        <div>
+          <div class="chat-title">GPW Sygnały (paper)</div>
+          <div class="chat-status">bot · makieta — karty przechwycone na sandboxie (nie wysłane)</div>
+        </div>
+      </div>
+      <div class="chat">
+        <div class="day-chip">czwartek, 23 lipca 2026</div>
+        <div class="sys">pusta kolejka po środzie — nie ma czego rozliczać na otwarciu</div>
+        <div class="sys">na zamknięciu zero nowych sygnałów; jedyny ruch: stop PKN 144,51 → 148,08 (+2,6% nad wejściem) w dniu odpisu 1,9 mld zł</div>
+        <div class="msg">📊 Portfel GPW (paper)
+Sesja: 2026-07-23
+Kapital: 98,551.23 PLN (gotowka: 4,453.60 PLN)
+Otwarte pozycje: 8<span class="t">19:31</span></div>
+        <div class="sys">dzień bez kart sygnałowych — tylko podsumowanie, zgodnie z zasadą: brak zdarzenia = brak powiadomienia</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Makieta: treść wiadomości wygenerowana przez <code>app.alerts.telegram</code> na kopii bazy (<code>data/sandbox.db</code>) — realna książka paper (<code>data/gpw.db</code>, wystartowała 23.07) nietknięta, karty przechwycone lokalnie (środowisko ma skonfigurowany Telegram, symulacja celowo nie wysyła). Przebieg pod środowiskiem dnia 7 (kod+configi sprzed PR #15 — <code>config_hash</code> serii bez zmian).
+    Sesja: czwartek 23.07.2026. Strategia <code>trend_momentum</code> v1, prowizja + spread + poślizg wliczone. Paper trading — żadnych prawdziwych zleceń.
+    Pełny przebieg: <a href="day-08-2026-07-23.md">day-08-2026-07-23.md</a>. Ta sama sesja w księgach pełnorynkowych z LLM: <a href="fresh-start-full-llm-2026-07-23-telegram-mockup.html">fresh-start v2</a>.
+  </div>
+</div>
+</body>
+</html>

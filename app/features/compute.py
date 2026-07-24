@@ -96,6 +96,16 @@ def compute_features(df: pd.DataFrame, benchmark_close: pd.Series | None = None)
 
     out["momentum_6m"] = returns(close, TD_6M)  # alias used by strategy config
 
+    # 12-1 momentum (Jegadeesh–Titman): 12-month return SKIPPING the most
+    # recent month (short-term reversal). Both shifted closes are past bars,
+    # so the value at T uses rows <= T only.
+    out["mom_12_1"] = close.shift(TD_1M) / close.shift(TD_12M) - 1.0
+
+    # Proximity to the trailing 52-week high (George–Hwang). The rolling max
+    # includes the current bar, so the ratio is in (0, 1]; 1.0 = a new high.
+    # min_periods = full window: a young listing has no defined 52w high.
+    out["pct_52w_high"] = close / close.rolling(TD_12M, min_periods=TD_12M).max()
+
     out["sma50"] = sma(close, SMA_FAST)
     out["sma200"] = sma(close, SMA_SLOW)
     out["close_vs_sma50"] = close / out["sma50"] - 1.0

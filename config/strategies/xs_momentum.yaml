@@ -1,0 +1,41 @@
+# Cross-sectional 12-1 momentum (Jegadeesh & Titman 1993, adapted).
+# Academic core: buy the past-12-month winners, skipping the most recent
+# month (short-term reversal). Adaptation to this engine: instead of a
+# calendar-rebalanced decile portfolio, a name is entered while it sits in
+# the top quintile of `mom_12_1` across the whole point-in-time universe
+# (mom_12_1_pct — dead tickers included while alive) and exited when it
+# decays out of the top half or breaks its ATR stop. A trend filter keeps
+# entries on the right side of the 200-session average.
+
+name: xs_momentum
+version: 1
+
+entry:
+  all:
+    - feature: mom_12_1_pct     # cross-sectional percentile of 12-1 momentum
+      op: gte
+      value: 0.80
+    - feature: close_vs_sma200
+      op: gt
+      value: 0.0
+
+entry_ranking:
+  - feature: mom_12_1           # strongest raw 12-1 momentum first
+    order: desc
+
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: mom_12_1_pct     # rank decay: no longer a winner
+      op: lt
+      value: 0.50
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

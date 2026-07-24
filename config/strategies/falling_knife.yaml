@@ -1,0 +1,47 @@
+# Falling knife / oversold reversal (user-directed; academic kin: De Bondt &
+# Thaler 1985 long-term reversal, adapted to a stabilization entry).
+# Core idea: a name crushed >= 40% below its 52-week high is a candidate
+# ONLY once it shows a real stabilization bounce (positive 1-month return
+# above a hard floor) — the strategy buys the recovering knife, never the
+# falling one. Exits: the recovery target (85% of the trailing high) takes
+# profit; the ATR stop cuts the thesis when the bounce fails.
+#
+# The global point-in-time liquidity gate (backtest.yaml universe.liquidity)
+# matters double here: crushed names are often crushed BECAUSE they are
+# dying — the fresh-bar + turnover floor keeps unquotable corpses out.
+
+name: falling_knife
+version: 1
+
+entry:
+  all:
+    - feature: pct_52w_high     # at least 40% below the 52-week high
+      op: lte
+      value: 0.60
+    - feature: ret_1m           # stabilization: a real 1-month bounce...
+      op: gte
+      value: 0.05
+    - feature: ret_3m           # ...that is not one dead-cat green candle
+      op: gt
+      value: 0.0
+
+entry_ranking:
+  - feature: ret_1m             # strongest stabilization first
+    order: desc
+
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: pct_52w_high     # recovery target reached — thesis played out
+      op: gte
+      value: 0.85
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

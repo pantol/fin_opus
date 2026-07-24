@@ -931,6 +931,21 @@ def _llm_score_on(inst: Instrument, day: pd.Timestamp):
     return _series_asof(inst.llm_scores, day)
 
 
+def prepare_strategy_inputs(conn, instruments: list[Instrument],
+                            strategy_cfg: dict, bt_cfg: dict) -> list[Instrument]:
+    """Attach every optional input THIS strategy references: materialized LLM
+    scores (DB read, no LLM call) and derived cross-sectional percentiles.
+    Strategies that reference neither get the instruments back untouched, so
+    their snapshots stay byte-identical."""
+    from app.features import cross_sectional as xs
+
+    if needs_llm_attach(strategy_cfg, bt_cfg):
+        instruments = attach_llm_scores(conn, instruments)
+    if xs.strategy_uses_cross_sectional(strategy_cfg):
+        instruments = xs.attach_cross_sectional(instruments)
+    return instruments
+
+
 def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
     """Return copies of `instruments` carrying point-in-time `llm_scores` read
     deterministically from materialized `llm_features` (no LLM call here).

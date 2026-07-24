@@ -1,0 +1,41 @@
+# 52-week-high proximity (George & Hwang 2004, adapted).
+# Academic core: nearness to the trailing 52-week high predicts returns
+# better than plain momentum (anchoring: investors under-react near the
+# high). Adaptation: enter while the close sits within 5% of its own
+# 52-week high with positive 6M momentum; exit on a fall to 80% of the
+# high (the anchor is lost) or the ATR stop.
+
+name: week52_high
+version: 1
+
+entry:
+  all:
+    - feature: pct_52w_high     # close / trailing 252-session max, in (0, 1]
+      op: gte
+      value: 0.95
+    - feature: momentum_6m
+      op: gt
+      value: 0.0
+
+entry_ranking:
+  - feature: pct_52w_high       # closest to (or at) the high first
+    order: desc
+  - feature: momentum_6m
+    order: desc
+
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: pct_52w_high
+      op: lt
+      value: 0.80
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

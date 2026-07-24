@@ -227,17 +227,20 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
-    # If the strategy gates on any llm_* feature — or uses market_* regime
-    # features whose llm component carries weight — attach point-in-time LLM
-    # features (materialized earlier; read deterministically, NO LLM call).
-    # Otherwise the gate would never see a value and silently block every entry.
+    # Attach whatever optional inputs the strategy references: materialized
+    # llm_* features (read deterministically, NO LLM call — also needed when
+    # the market_* regime llm component carries weight) and cross-sectional
+    # percentile features. Without this a gate would never see a value and
+    # silently block every entry.
     if engine.needs_llm_attach(strat, bt_cfg):
-        instruments = engine.attach_llm_scores(conn, instruments)
+        instruments = engine.prepare_strategy_inputs(conn, instruments, strat, bt_cfg)
         with_scores = sum(
             1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
         )
         print(f"Strategy uses llm_score; attached LLM features for "
               f"{with_scores}/{len(instruments)} instruments.")
+    else:
+        instruments = engine.prepare_strategy_inputs(conn, instruments, strat, bt_cfg)
 
     membership, membership_error = _load_membership(conn, bt_cfg)
     if membership_error:

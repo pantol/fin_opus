@@ -201,9 +201,14 @@ def run_signals(
         _alert_refusal(send_fn, report.reason, dry_run)
         return EXIT_REFUSED, report
     radar_enabled = bool(regime_mod.regime_config(bt_cfg)["radar"]["enabled"])
-    if engine.needs_llm_attach(strategy_cfg, bt_cfg) or (
-            radar_enabled and regime_mod.needs_llm(bt_cfg)):
-        # Reads pre-materialized llm_features rows; NO LLM call happens here.
+    # Reads pre-materialized llm_features rows + derives cross-sectional
+    # percentiles as the strategy requires; NO LLM call happens here.
+    instruments = engine.prepare_strategy_inputs(conn, instruments,
+                                                 strategy_cfg, bt_cfg)
+    if (radar_enabled and regime_mod.needs_llm(bt_cfg)
+            and not engine.needs_llm_attach(strategy_cfg, bt_cfg)):
+        # Radar-only case: the strategy itself is llm/regime-blind but the
+        # informational radar card still wants the llm breadth component.
         instruments = engine.attach_llm_scores(conn, instruments)
 
     membership = None

@@ -88,38 +88,45 @@ def _book_section(conn, user_id: str) -> list[str]:
     return lines
 
 
-def build_digest(conn, *, now: datetime | None = None) -> str | None:
-    """Build the Polish morning card, or None when there is nothing to say
-    (no paper book AND no fresh filings)."""
-    now = now or datetime.now(WARSAW)
-    since = (now - timedelta(hours=24)).isoformat()
-    since_date = (now - timedelta(days=2)).date().isoformat()
-
-    users = [r["user_id"] for r in conn.execute(
+def paper_users(conn) -> list[str]:
+    return [r["user_id"] for r in conn.execute(
         "SELECT user_id FROM paper_state WHERE user_id LIKE ? ORDER BY user_id",
         (PAPER_PREFIX + "%",)).fetchall()]
 
+
+def _fresh_filings(conn, now: datetime):
+    since = (now - timedelta(hours=24)).isoformat()
     try:
-        filings = conn.execute(
+        return conn.execute(
             "SELECT f.title, f.instrument_id, i.ticker FROM filings f "
             "LEFT JOIN instruments i ON i.id = f.instrument_id "
             "WHERE f.published_at >= ? ORDER BY f.published_at DESC",
             (since,),
         ).fetchall()
     except Exception:  # noqa: BLE001 — collector table may not exist yet
-        filings = []
+        return []
 
-    if not users and not filings:
-        return None
 
+def build_user_digest(conn, user_id: str, *, now: datetime | None = None) -> str:
+    """One user's morning card (routed to THAT user's chat by the scheduler)."""
+    now = now or datetime.now(WARSAW)
     lines = ["🌅 Poranny przeglad GPW (paper)",
-             f"Data: {now.date().isoformat()}"]
-    for user_id in users:
-        lines.append("")
-        lines.extend(_book_section(conn, user_id))
-
+             f"Data: {now.date().isoformat()}", ""]
+    lines.extend(_book_section(conn, user_id))
     lines.append("")
-    lines.append(f"Nowe komunikaty (24h): {len(filings)}")
+    lines.append("Informacja poranna — decyzje zapadaja WYLACZNIE wieczorem "
+                 "(przebieg 19:30).")
+    return "\n".join(lines)
+
+
+def build_filings_digest(conn, *, now: datetime | None = None) -> str | None:
+    """Market-wide filings card (shared/ops chat), or None with no news."""
+    now = now or datetime.now(WARSAW)
+    since_date = (now - timedelta(days=2)).date().isoformat()
+    filings = _fresh_filings(conn, now)
+    if not filings:
+        return None
+    lines = [f"Nowe komunikaty (24h): {len(filings)}"]
     for f in filings[:_MAX_FILINGS_SHOWN]:
         name = (f["ticker"] or "?").upper()
         title = (f["title"] or "(bez tytulu)")[:70]
@@ -131,7 +138,26 @@ def build_digest(conn, *, now: datetime | None = None) -> str | None:
         lines.append(entry)
     if len(filings) > _MAX_FILINGS_SHOWN:
         lines.append(f"  ... i {len(filings) - _MAX_FILINGS_SHOWN} kolejnych")
+    return "\n".join(lines)
 
+
+def build_digest(conn, *, now: datetime | None = None) -> str | None:
+    """Combined single-channel card: every book + the filings section.
+    None when there is nothing to say (no paper book AND no fresh filings)."""
+    now = now or datetime.now(WARSAW)
+    users = paper_users(conn)
+    filings_card = build_filings_digest(conn, now=now)
+    if not users and filings_card is None:
+        return None
+
+    lines = ["🌅 Poranny przeglad GPW (paper)",
+             f"Data: {now.date().isoformat()}"]
+    for user_id in users:
+        lines.append("")
+        lines.extend(_book_section(conn, user_id))
+    lines.append("")
+    lines.append(filings_card if filings_card is not None
+                 else "Nowe komunikaty (24h): 0")
     lines.append("")
     lines.append("Informacja poranna — decyzje zapadaja WYLACZNIE wieczorem "
                  "(przebieg 19:30).")

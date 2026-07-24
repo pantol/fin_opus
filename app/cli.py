@@ -19,6 +19,7 @@ import sys
 import yaml
 
 from app import config as cfg
+from app.alerts import telegram
 from app.backtest import ab_harness, engine
 from app.db import connect, init_db
 from app.ingestion import demo, provenance, stooq
@@ -746,12 +747,66 @@ def cmd_signals(args) -> int:
     Cron-friendly (evening, after `make ingest`). Exit codes: 0 = processed or
     idempotent no-op; 2 = refused (stale/partial data, config change, catch-up
     cap) — the refusal reason is printed and alerted, state is untouched.
+
+    Multi-tenant (Phase 6): `--user X` runs X's book with X's profile-resolved
+    strategy + risk overlay + sector exclusions, cards routed to X's chat.
+    `--all-users` runs the default book plus every profiled user whose book
+    was ALREADY started — a new user's first run must be a deliberate manual
+    `signals --user X` (the bootstrap pins inception + config hash).
     """
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
     bt_cfg = cfg.load_backtest_config()
-    strat = cfg.load_strategy(args.strategy)
+
+    if args.all_users and args.user:
+        print("--all-users and --user are mutually exclusive")
+        conn.close()
+        return 2
+    if args.all_users:
+        users: list[str | None] = [None] + [
+            r["user_id"] for r in conn.execute(
+                "SELECT user_id FROM user_profiles ORDER BY user_id")]
+        worst = 0
+        for user in users:
+            code = _signals_for_user(conn, universe, bt_cfg, args, user,
+                                     require_started=user is not None)
+            worst = max(worst, code)
+        conn.close()
+        return worst
+
+    code = _signals_for_user(conn, universe, bt_cfg, args, args.user,
+                             require_started=False)
+    conn.close()
+    return code
+
+
+def _signals_for_user(conn, universe, bt_cfg, args, user: str | None,
+                      *, require_started: bool) -> int:
+    """One user's evening run; profile-blind legacy path when user is None."""
+    from app.paper import store as paper_store
+    from app.users import profiles as prof
+
+    excluded = None
+    init_cap = None
+    if user is not None:
+        if require_started and conn.execute(
+                "SELECT 1 FROM paper_state WHERE user_id = ?",
+                (paper_store.paper_user_id(user),)).fetchone() is None:
+            print(f"paper[{paper_store.paper_user_id(user)}]: skipped — book "
+                  f"not started (bootstrap deliberately: signals --user {user})")
+            return 0
+        profile = prof.load_profile(conn, user)
+        if profile is None:
+            print(f"no profile for user '{user}' — run "
+                  f"`python -m app.cli survey --user {user}` first")
+            return 2
+        strat = prof.apply_profile(cfg.load_strategy(profile["strategy"]),
+                                   profile, cfg.load_profiles_config())
+        excluded = prof.excluded_sectors(profile)
+        init_cap = profile.get("initial_capital")
+    else:
+        strat = cfg.load_strategy(args.strategy)
 
     code, report = paper_loop.run_signals(
         conn,
@@ -761,9 +816,12 @@ def cmd_signals(args) -> int:
         session_end=args.session,
         accept_config_change=args.accept_config_change,
         dry_run=args.dry_run,
+        user=user,
+        excluded_sectors=excluded,
+        initial_capital=init_cap,
+        send_fn=telegram.user_send_fn(user),
     )
     print(report.as_text())
-    conn.close()
     return code
 
 
@@ -1017,6 +1075,12 @@ def main(argv=None) -> int:
     sig.add_argument("--accept-config-change", action="store_true",
                      help="Acknowledge a strategy/cost config change and continue "
                           "the track record anyway")
+    sig.add_argument("--user", default=None,
+                     help="Run this user's book with their profile-resolved "
+                          "strategy/risk/exclusions (see: survey)")
+    sig.add_argument("--all-users", action="store_true",
+                     help="Default book + every profiled user whose book is "
+                          "already started (never bootstraps a new one)")
 
     web = sub.add_parser("web",
                          help="Read-only per-user paper dashboard (display "

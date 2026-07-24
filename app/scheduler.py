@@ -43,7 +43,10 @@ JOB_COMMANDS: dict[str, list[str]] = {
     "intraday": ["app.ingestion.intraday"],
     "ingest": ["app.cli", "ingest"],
     "llm": ["app.cli", "llm"],
-    "signals": ["app.cli", "signals"],
+    # Every STARTED paper book (default + profiled users) in one evening run;
+    # a new user's book is never bootstrapped by the clock — the first run is
+    # a deliberate manual `signals --user X`.
+    "signals": ["app.cli", "signals", "--all-users"],
     "status": ["app.cli", "status"],
     "backup": ["app.cli", "backup"],
 }
@@ -230,19 +233,29 @@ def execute_job(job: dict, db_path: str | None, *, run_step_fn=run_step,
 
 
 def _run_digest(db_path: str | None) -> str:
+    """Per-user morning cards routed to each user's chat (Phase 6); one
+    market-wide filings card on the shared chat."""
     from app.alerts import digest as digest_mod
     from app.alerts import telegram
 
     conn = connect(db_path)
     try:
         init_db(conn)
-        card = digest_mod.build_digest(conn)
+        users = digest_mod.paper_users(conn)
+        sent = 0
+        for user_id in users:
+            card = digest_mod.build_user_digest(conn, user_id)
+            telegram.send_text(card, chat_id=telegram.chat_id_for_user(user_id))
+            sent += 1
+        filings_card = digest_mod.build_filings_digest(conn)
+        if filings_card is not None:
+            telegram.send_text(filings_card)
+            sent += 1
     finally:
         conn.close()
-    if card is None:
+    if not sent:
         return "digest: nothing to report"
-    telegram.send_text(card)
-    return "digest: sent"
+    return f"digest: sent {sent} card(s)"
 
 
 def fire_due(conn, schedule_cfg: dict, now: datetime, db_path: str | None,

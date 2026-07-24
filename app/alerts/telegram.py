@@ -11,10 +11,38 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import requests
 
 _API = "https://api.telegram.org/bot{token}/sendMessage"
+
+
+# --- per-user routing (Phase 6) ----------------------------------------------
+# One bot, per-user chats: TELEGRAM_CHAT_ID__<USER> (e.g.
+# TELEGRAM_CHAT_ID__DRON) routes that user's cards to their own chat;
+# without it every card falls back to the shared TELEGRAM_CHAT_ID. Secrets
+# stay in the environment / .env — never in the repo (CLAUDE.md).
+
+def _env_key_for_user(user: str) -> str:
+    base = user.split(":", 1)[-1]  # 'paper:dron' and 'dron' both -> 'dron'
+    return "TELEGRAM_CHAT_ID__" + re.sub(r"[^A-Za-z0-9]", "_", base).upper()
+
+
+def chat_id_for_user(user: str | None) -> str | None:
+    """The chat a user's cards go to: their own env override, else shared."""
+    if user:
+        per_user = os.environ.get(_env_key_for_user(user))
+        if per_user:
+            return per_user
+    return os.environ.get("TELEGRAM_CHAT_ID")
+
+
+def user_send_fn(user: str | None):
+    """A send_fn bound to the user's chat (drop-in for send_text)."""
+    def _send(text: str) -> dict:
+        return send_text(text, chat_id=chat_id_for_user(user))
+    return _send
 
 
 def _format_card(decision: dict) -> str:

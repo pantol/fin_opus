@@ -472,6 +472,31 @@ first): `cp ops/pl.finopus.daemon.plist ~/Library/LaunchAgents/ && launchctl
 load ~/Library/LaunchAgents/pl.finopus.daemon.plist`. Caveat: a sleeping
 laptop skips slots (jobs catch up); a VPS is the long-term home.
 
+### 10. Profiles + multiple users (Phases 5-6)
+
+```bash
+python -m app.cli survey --user dron          # Polish risk survey -> profile
+python -m app.cli signals --user dron         # deliberate first run = bootstrap
+python -m app.cli signals --all-users         # default book + every STARTED book
+```
+
+The survey maps answers **in pure code** (ZERO LLM) to a tolerance bucket
+(`config/profiles.yaml`): the user's strategy YAML, a risk_per_trade
+multiplier, a personal drawdown breaker, a position cap and excluded sectors
+— all bounded by hard caps no answer can pierce (max 2% risk/trade, breaker
+<= 40%, no leverage). `signals --user X` overlays X's profile onto their
+strategy (the overlay is stamped into the config, so it is part of X's
+config fingerprint), excludes their sectors from NEW entries (exits always
+evaluate) and routes cards to `TELEGRAM_CHAT_ID__X` (fallback: the shared
+`TELEGRAM_CHAT_ID`). Every book lives under `user_id 'paper:<user>'` in the
+shared tables — watermarks, positions, orders and equity are fully isolated
+(`tests/test_multitenant.py`). The scheduler's evening chain runs
+`signals --all-users`, which never bootstraps a new book: a user's first run
+is always a deliberate manual `signals --user X`. The `make web` dashboard
+is already per-user. Postgres/queue stay a documented seam (simple monolith
+rule); giving signals to OTHER PEOPLE has regulatory weight — see the
+blueprint's legal section before any second REAL user.
+
 ## Project structure
 
 Visual map of the whole repo — architecture + daily-cycle Mermaid diagrams, DB

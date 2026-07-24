@@ -5,6 +5,15 @@ This is a display layer only: it renders the book the paper loop wrote —
 it never computes or writes money state, and the read-only connection makes
 that structural (an INSERT/UPDATE raises at the SQLite level).
 
+The ONE deliberate exception is onboarding (`/onboarding/...`): those
+endpoints open a separate read-write connection whose writes are limited to
+`user_profiles` plus the LLM audit/cache/cost tables the LLMClient itself
+maintains (`llm_calls`, `llm_cache`, `llm_costs`). Money tables (positions /
+trades / decisions / paper_*) are never written by the web layer — starting
+a book stays a deliberate CLI act (`signals --user X`). See
+app/web/onboarding.py for the LLM boundary (language layer only; the profile
+is computed by deterministic code).
+
 UI strings are Polish (end-user surface, same convention as Telegram cards);
 code and comments stay English.
 """
@@ -18,6 +27,8 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, abort, redirect, render_template, request, url_for
 from markupsafe import Markup
+
+from app.web import onboarding as onb
 
 WARSAW = ZoneInfo("Europe/Warsaw")
 
@@ -402,7 +413,10 @@ def build_chart(equity: list[tuple[str, float]],
 # --- app factory ---------------------------------------------------------------
 
 def create_app(db_path: str | Path | None = None,
-               benchmark_ticker: str | None = None) -> Flask:
+               benchmark_ticker: str | None = None,
+               llm_transport=None, llm_meta_transport=None) -> Flask:
+    """`llm_transport` / `llm_meta_transport`: injectable HTTP seams for the
+    onboarding chat's LLMClient — tests run fully offline through them."""
     from app.config import DEFAULT_DB_PATH
 
     if benchmark_ticker is None:
@@ -416,6 +430,8 @@ def create_app(db_path: str | Path | None = None,
     app = Flask(__name__)
     app.config["DB_PATH"] = str(db_path or DEFAULT_DB_PATH)
     app.config["BENCH_TICKER"] = benchmark_ticker
+    app.config["LLM_TRANSPORT"] = llm_transport
+    app.config["LLM_META_TRANSPORT"] = llm_meta_transport
     app.jinja_env.filters["pln"] = fmt_pln
     app.jinja_env.filters["pct"] = fmt_pct
     app.jinja_env.filters["qty"] = fmt_qty
@@ -437,19 +453,64 @@ def create_app(db_path: str | Path | None = None,
     def healthz():
         return {"status": "ok", "db": app.config["DB_PATH"]}
 
+    def _profiles(conn) -> dict[str, dict]:
+        """{user_id: profile-row dict} — RO read; absent table reads empty."""
+        try:
+            return {r["user_id"]: dict(r) for r in conn.execute(
+                "SELECT user_id, display_name, risk_tolerance, strategy "
+                "FROM user_profiles ORDER BY user_id")}
+        except sqlite3.OperationalError:
+            return {}
+
+    def _open_rw():
+        """The onboarding write path: user_profiles + LLM audit tables ONLY
+        (see module docstring). Opened per request, closed immediately."""
+        from app.db import connect as connect_rw, init_db
+
+        conn = connect_rw(app.config["DB_PATH"])
+        init_db(conn)
+        return conn
+
+    def _llm_client(conn):
+        from app import config as cfg
+        from app.llm.client import LLMClient
+
+        # An injected transport means offline/test mode: satisfy the client's
+        # key check with a dummy so no env var is needed; production keeps
+        # reading OPENROUTER_API_KEY from the environment.
+        return LLMClient(conn, cfg.load_llm_config(),
+                         transport=app.config["LLM_TRANSPORT"],
+                         meta_transport=app.config["LLM_META_TRANSPORT"],
+                         api_key=("offline-test"
+                                  if app.config["LLM_TRANSPORT"] is not None
+                                  else None))
+
+    def _llm_available() -> bool:
+        import os
+        return (app.config["LLM_TRANSPORT"] is not None
+                or bool(os.environ.get("OPENROUTER_API_KEY")))
+
     @app.get("/")
     def index():
+        """User picker — ALWAYS the entry page: pick a book, resume an
+        onboarding, or create a new user (survey first, book later)."""
         conn = _open()
         if conn is None:
             return _page("no_db.html"), 503
         try:
             users = users_overview(conn)
+            profiles = _profiles(conn)
         finally:
             conn.close()
-        # One book -> straight to its dashboard; ?stay=1 (breadcrumb) shows the list.
-        if len(users) == 1 and request.args.get("stay") is None:
-            return redirect(url_for("user_dashboard", user_id=users[0]["user_id"]))
-        return _page("index.html", users=users)
+        base_of = {u["user_id"]: u["user_id"].split(":", 1)[-1] for u in users}
+        for u in users:
+            u["profile"] = profiles.get(base_of[u["user_id"]])
+            u["base_user"] = base_of[u["user_id"]]
+            u["can_onboard"] = onb.valid_user_slug(base_of[u["user_id"]])
+        books_bases = set(base_of.values())
+        profiles_only = [p for uid, p in profiles.items()
+                         if uid not in books_bases]
+        return _page("index.html", users=users, profiles_only=profiles_only)
 
     @app.get("/u/<user_id>")
     def user_dashboard(user_id: str):
@@ -464,6 +525,111 @@ def create_app(db_path: str | Path | None = None,
             abort(404)
         return _page("user.html",
                      bench_label=app.config["BENCH_TICKER"].upper(), **data)
+
+    # --- onboarding (survey chat; the ONLY web write surface) -----------------
+
+    @app.post("/onboarding/new")
+    def onboarding_new():
+        user = (request.form.get("user") or "").strip().lower()
+        if not onb.valid_user_slug(user):
+            return _page("onboarding.html", user=None, error=(
+                "Nazwa uzytkownika: 1-32 znakow [a-z0-9_-], nie 'default'."),
+                llm_available=_llm_available(), opening=onb.OPENING_MESSAGE,
+                survey=_survey_questions()), 400
+        return redirect(url_for("onboarding_page", user=user))
+
+    def _survey_questions():
+        from app.users.profiles import SURVEY
+        return SURVEY
+
+    @app.get("/onboarding/<user>")
+    def onboarding_page(user: str):
+        if not onb.valid_user_slug(user):
+            abort(404)
+        conn = _open()
+        existing = None
+        if conn is not None:
+            try:
+                existing = _profiles(conn).get(user)
+            finally:
+                conn.close()
+        return _page("onboarding.html", user=user, error=None,
+                     existing=existing, llm_available=_llm_available(),
+                     opening=onb.OPENING_MESSAGE, survey=_survey_questions())
+
+    @app.post("/api/onboarding/<user>/chat")
+    def onboarding_chat(user: str):
+        from app.llm.client import LLMBudgetExceededError
+
+        if not onb.valid_user_slug(user):
+            abort(404)
+        if not _llm_available():
+            return {"fallback": True,
+                    "reason": "Brak klucza OPENROUTER_API_KEY — uzyj "
+                              "formularza ponizej."}, 503
+        payload = request.get_json(silent=True) or {}
+        transcript = payload.get("transcript") or []
+        if not isinstance(transcript, list):
+            return {"error": "transcript must be a list"}, 400
+        conn = _open_rw()
+        try:
+            try:
+                turn = onb.chat_turn(_llm_client(conn), transcript)
+            except LLMBudgetExceededError:
+                return {"fallback": True,
+                        "reason": "Miesieczny budzet LLM wyczerpany — uzyj "
+                                  "formularza ponizej."}, 503
+            except onb.LLMValidationError:
+                # Malformed model output: rejected, never repaired/guessed.
+                return {"fallback": True,
+                        "reason": "Model zwrocil niepoprawna odpowiedz "
+                                  "(odrzucona). Uzyj formularza ponizej."}, 422
+        finally:
+            conn.close()
+        out = {"reply": turn["reply"], "collected": turn["collected"],
+               "complete": onb.answers_complete(turn["collected"])}
+        if out["complete"]:
+            from app import config as cfg
+            try:
+                out["preview"] = onb.preview_profile(
+                    user, turn["collected"], cfg.load_profiles_config())
+            except ValueError:
+                out["complete"] = False  # model enums failed the strict clean
+        return out
+
+    @app.post("/api/onboarding/<user>/save")
+    def onboarding_save(user: str):
+        if not onb.valid_user_slug(user):
+            abort(404)
+        from app import config as cfg
+        from app.users import profiles as prof
+
+        payload = request.get_json(silent=True) or {}
+        try:
+            answers = onb.clean_answers(payload.get("answers") or {})
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        answers["source"] = ("llm_chat" if payload.get("source") == "llm_chat"
+                             else "form")
+        profile = prof.build_profile(
+            user, answers, cfg.load_profiles_config(),
+            display_name=(payload.get("display_name") or user)[:64])
+        conn = _open_rw()
+        try:
+            prof.save_profile(conn, profile)
+            has_book = conn.execute(
+                "SELECT 1 FROM paper_state WHERE user_id = ?",
+                (f"paper:{user}",)).fetchone() is not None
+        finally:
+            conn.close()
+        return {"ok": True,
+                "redirect": (url_for("user_dashboard", user_id=f"paper:{user}")
+                             if has_book else url_for("index")),
+                "book_started": has_book,
+                "profile": {k: profile[k] for k in
+                            ("user_id", "risk_tolerance", "strategy",
+                             "risk_multiplier", "max_drawdown_pct",
+                             "excluded_sectors")}}
 
     @app.errorhandler(404)
     def not_found(_e):

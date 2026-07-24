@@ -1,4 +1,4 @@
-.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop intraday intraday-loop refdata check-data backup restore-test status signals label eval-llm web clean
+.PHONY: setup test ingest ingest-offline features backtest backtest-offline ab ab-offline llm collect collect-loop intraday intraday-loop refdata check-data backup restore-test status signals label eval-llm web daemon clean
 
 # Prefer the local virtualenv if present, else fall back to python3.
 PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
@@ -119,6 +119,12 @@ signals: ingest
 # Serves data/gpw.db on http://127.0.0.1:8765 by default.
 web:
 	$(PYTHON) -m app.cli web
+
+# Working-window scheduler (config/schedule.yaml): collect/intraday/digest in
+# the 07-19 window, the evening decision chain at 19:30, health at 19:45.
+# Foreground process; ops/pl.finopus.daemon.plist runs it under launchd.
+daemon:
+	$(PYTHON) -m app.scheduler
 
 clean:
 	rm -f data/*.db

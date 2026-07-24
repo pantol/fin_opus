@@ -1,0 +1,28 @@
+# Phase 5: risk-tolerance -> deterministic gating defaults. The survey
+# (python -m app.cli survey) maps answers to one of these tolerance buckets;
+# apply_profile() then OVERLAYS the bucket + per-user answers onto the user's
+# strategy risk block. Hard caps below bind EVERYTHING — no profile can ever
+# exceed them, whatever the survey said.
+
+tolerances:
+  conservative:
+    strategy: trend_momentum_regime   # regime gate: stands aside in risk-off
+    risk_multiplier: 0.5              # halves risk_per_trade
+    max_drawdown_pct: 0.10
+    max_positions: 5
+  balanced:
+    strategy: trend_momentum
+    risk_multiplier: 1.0
+    max_drawdown_pct: 0.25
+    max_positions: 8
+  aggressive:
+    strategy: trend_momentum_llm      # llm-gated entries, full baseline risk
+    risk_multiplier: 1.5
+    max_drawdown_pct: 0.40
+    max_positions: 10
+
+# Absolute bounds (deterministic code enforces them AFTER any multiplier):
+hard_caps:
+  risk_per_trade_max: 0.02        # never risk more than 2% of equity per trade
+  max_total_exposure: 1.0         # no leverage, ever
+  drawdown_breaker_max: 0.40      # the breaker can never be looser than this

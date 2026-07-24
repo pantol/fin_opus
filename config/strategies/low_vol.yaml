@@ -1,0 +1,45 @@
+# Low-volatility anomaly (Blitz & van Vliet 2007 / Baker-Bradley-Wurgler,
+# adapted). Academic core: the lowest-volatility names earn better
+# risk-adjusted returns than the high-vol lottery tickets. Adaptation:
+# enter names in the calmest tercile of realized vol across the
+# point-in-time universe (vol_xs_pct), with a 200-session trend filter so
+# "calm" does not mean "calmly bleeding"; exit when the name migrates into
+# the noisy half, the trend breaks, or the ATR stop fires.
+
+name: low_vol
+version: 1
+
+entry:
+  all:
+    - feature: vol_xs_pct       # cross-sectional percentile of realized vol
+      op: lte
+      value: 0.30
+    - feature: close_vs_sma200
+      op: gt
+      value: 0.0
+
+entry_ranking:
+  - feature: vol_xs_pct         # calmest names first
+    order: asc
+  - feature: momentum_6m
+    order: desc
+
+exit:
+  any:
+    - type: atr_stop
+      atr_mult: 2.5
+    - feature: vol_xs_pct
+      op: gte
+      value: 0.70
+    - feature: close_vs_sma200
+      op: lt
+      value: 0.0
+
+risk:
+  risk_per_trade: 0.01
+  atr_mult_stop: 2.5
+  max_open_positions: 8
+  max_exposure_per_name: 0.20
+  max_exposure_per_sector: 0.40
+  max_total_exposure: 1.0
+  drawdown_circuit_breaker: 0.25

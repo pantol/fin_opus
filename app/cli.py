@@ -19,6 +19,7 @@ import sys
 import yaml
 
 from app import config as cfg
+from app.alerts import telegram
 from app.backtest import ab_harness, engine
 from app.db import connect, init_db
 from app.ingestion import demo, provenance, stooq
@@ -227,16 +228,20 @@ def cmd_backtest(args) -> int:
         print("No price data. Run `make ingest` first.")
         return 1
 
-    # If the strategy gates on any llm_* feature, attach point-in-time LLM
-    # features (materialized earlier; read deterministically, NO LLM call).
-    # Otherwise the gate would never see a value and silently block every entry.
-    if engine.strategy_uses_llm_features(strat):
-        instruments = engine.attach_llm_scores(conn, instruments)
+    # Attach whatever optional inputs the strategy references: materialized
+    # llm_* features (read deterministically, NO LLM call — also needed when
+    # the market_* regime llm component carries weight) and cross-sectional
+    # percentile features. Without this a gate would never see a value and
+    # silently block every entry.
+    if engine.needs_llm_attach(strat, bt_cfg):
+        instruments = engine.prepare_strategy_inputs(conn, instruments, strat, bt_cfg)
         with_scores = sum(
             1 for i in instruments if i.llm_scores is not None and not i.llm_scores.empty
         )
         print(f"Strategy uses llm_score; attached LLM features for "
               f"{with_scores}/{len(instruments)} instruments.")
+    else:
+        instruments = engine.prepare_strategy_inputs(conn, instruments, strat, bt_cfg)
 
     membership, membership_error = _load_membership(conn, bt_cfg)
     if membership_error:
@@ -742,12 +747,66 @@ def cmd_signals(args) -> int:
     Cron-friendly (evening, after `make ingest`). Exit codes: 0 = processed or
     idempotent no-op; 2 = refused (stale/partial data, config change, catch-up
     cap) — the refusal reason is printed and alerted, state is untouched.
+
+    Multi-tenant (Phase 6): `--user X` runs X's book with X's profile-resolved
+    strategy + risk overlay + sector exclusions, cards routed to X's chat.
+    `--all-users` runs the default book plus every profiled user whose book
+    was ALREADY started — a new user's first run must be a deliberate manual
+    `signals --user X` (the bootstrap pins inception + config hash).
     """
     conn = connect(args.db)
     init_db(conn)
     universe = cfg.load_universe()
     bt_cfg = cfg.load_backtest_config()
-    strat = cfg.load_strategy(args.strategy)
+
+    if args.all_users and args.user:
+        print("--all-users and --user are mutually exclusive")
+        conn.close()
+        return 2
+    if args.all_users:
+        users: list[str | None] = [None] + [
+            r["user_id"] for r in conn.execute(
+                "SELECT user_id FROM user_profiles ORDER BY user_id")]
+        worst = 0
+        for user in users:
+            code = _signals_for_user(conn, universe, bt_cfg, args, user,
+                                     require_started=user is not None)
+            worst = max(worst, code)
+        conn.close()
+        return worst
+
+    code = _signals_for_user(conn, universe, bt_cfg, args, args.user,
+                             require_started=False)
+    conn.close()
+    return code
+
+
+def _signals_for_user(conn, universe, bt_cfg, args, user: str | None,
+                      *, require_started: bool) -> int:
+    """One user's evening run; profile-blind legacy path when user is None."""
+    from app.paper import store as paper_store
+    from app.users import profiles as prof
+
+    excluded = None
+    init_cap = None
+    if user is not None:
+        if require_started and conn.execute(
+                "SELECT 1 FROM paper_state WHERE user_id = ?",
+                (paper_store.paper_user_id(user),)).fetchone() is None:
+            print(f"paper[{paper_store.paper_user_id(user)}]: skipped — book "
+                  f"not started (bootstrap deliberately: signals --user {user})")
+            return 0
+        profile = prof.load_profile(conn, user)
+        if profile is None:
+            print(f"no profile for user '{user}' — run "
+                  f"`python -m app.cli survey --user {user}` first")
+            return 2
+        strat = prof.apply_profile(cfg.load_strategy(profile["strategy"]),
+                                   profile, cfg.load_profiles_config())
+        excluded = prof.excluded_sectors(profile)
+        init_cap = profile.get("initial_capital")
+    else:
+        strat = cfg.load_strategy(args.strategy)
 
     code, report = paper_loop.run_signals(
         conn,
@@ -757,10 +816,125 @@ def cmd_signals(args) -> int:
         session_end=args.session,
         accept_config_change=args.accept_config_change,
         dry_run=args.dry_run,
+        user=user,
+        excluded_sectors=excluded,
+        initial_capital=init_cap,
+        send_fn=telegram.user_send_fn(user),
     )
     print(report.as_text())
-    conn.close()
     return code
+
+
+def cmd_survey(args) -> int:
+    """Polish risk-profile survey (Phase 5). ZERO LLM: answers map to a
+    tolerance bucket + gating knobs in pure code (config/profiles.yaml).
+
+    Interactive by default; `--answers a,b,c,d,banking` fills the five
+    questions non-interactively (last field = comma-free sector list, use
+    '-' for none)."""
+    from app.users import profiles as prof
+
+    profiles_cfg = cfg.load_profiles_config()
+    answers: dict = {}
+    if args.answers:
+        parts = [p.strip() for p in args.answers.split(",")]
+        scored = [q for q in prof.SURVEY if q["options"]]
+        if len(parts) < len(scored):
+            print(f"--answers needs {len(scored)} scored answers + optional "
+                  "exclusions, e.g. a,b,c,d,banking (use '-' for none)")
+            return 1
+        for q, p in zip(scored, parts):
+            answers[q["id"]] = p.lower()
+        exclusions = parts[len(scored):]
+        answers["exclusions"] = ",".join(
+            e for e in exclusions if e and e != "-")
+    else:
+        print("Ankieta profilu ryzyka (paper). Odpowiadaj litera a/b/c.\n")
+        for q in prof.SURVEY:
+            print(q["question"])
+            if q["options"]:
+                for key, (label, _pts) in q["options"].items():
+                    print(f"  {key}) {label}")
+                while True:
+                    choice = input("> ").strip().lower()
+                    if choice in q["options"]:
+                        answers[q["id"]] = choice
+                        break
+                    print("Wpisz " + "/".join(q["options"]))
+            else:
+                answers[q["id"]] = input("> ").strip()
+            print()
+
+    profile = prof.build_profile(args.user, answers, profiles_cfg,
+                                 display_name=args.name)
+    conn = connect(args.db)
+    init_db(conn)
+    prof.save_profile(conn, profile)
+    conn.close()
+    tol_pl = {"conservative": "ostrozny", "balanced": "zrownowazony",
+              "aggressive": "agresywny"}[profile["risk_tolerance"]]
+    print(f"Zapisano profil '{args.user}': {tol_pl}, "
+          f"strategia {profile['strategy']}, "
+          f"mnoznik ryzyka x{profile['risk_multiplier']}, "
+          f"max obsuniecie {profile['max_drawdown_pct']:.0%}, "
+          f"wykluczenia: {', '.join(profile['excluded_sectors']) or 'brak'}")
+    print("Profil zadziala przy nastepnym `signals --user "
+          f"{args.user}` (nowa ksiazka paper lub swiadome "
+          "--accept-config-change na istniejacej).")
+    return 0
+
+
+def cmd_regime(args) -> int:
+    """Market-regime radar report (Phase 3; display only, ZERO decisions).
+
+    Prints today's deterministic risk score + components, the recent state
+    flips, and the retrospective false-alarm scoreboard (which risk-off
+    switches the benchmark later justified). The forward-looking judgment
+    lives ONLY in this report — never in any feature or decision."""
+    from app.features import regime as regime_mod
+
+    conn = connect(args.db)
+    init_db(conn)
+    universe = cfg.load_universe()
+    bt_cfg = cfg.load_backtest_config()
+    instruments, bench_close = engine.load_instruments(
+        conn, universe, universe["benchmark"]["ticker"],
+        mode=engine.universe_mode(bt_cfg))
+    if not instruments:
+        print("No price data. Run `make ingest` first.")
+        conn.close()
+        return 1
+    if regime_mod.needs_llm(bt_cfg):
+        instruments = engine.attach_llm_scores(conn, instruments)
+    feats = regime_mod.compute_market_features(instruments, bench_close, bt_cfg)
+    conn.close()
+    if feats.empty:
+        print("Not enough benchmark history to compute the regime (SMA warmup).")
+        return 1
+    last = feats.iloc[-1]
+    state = "RISK-ON" if last["market_risk_on"] else "RISK-OFF"
+    print(f"Regime as of {feats.index[-1].date().isoformat()}: {state} "
+          f"(score {last['market_risk_score']:+.3f})")
+    print(f"  components: trend {last['market_trend']:+.3f}, "
+          f"breadth {last['market_breadth']:+.3f}, vol {last['market_vol']:+.3f}, "
+          f"drawdown {last['market_drawdown']:+.3f}, llm {last['market_llm']:+.3f}")
+    flips = regime_mod.switches(feats)
+    print(f"\nState flips: {len(flips)} total; last 10:")
+    for sw in flips[-10:]:
+        print(f"  {sw['date']}: -> {sw['to_state']} (score {sw['score']:+.3f})")
+    rep = regime_mod.false_alarm_report(feats, bench_close, bt_cfg)
+    rate = ("n/a (no fully elapsed risk-off switches)"
+            if rep["false_alarm_rate"] is None
+            else f"{rep['false_alarm_rate']:.0%} ({rep['n_false']}/{rep['n_judged']})")
+    print(f"\nFalse-alarm report (risk-off unjustified unless the benchmark "
+          f"fell <= -{rep['dd_threshold']:.0%} within {rep['horizon_sessions']} "
+          f"sessions): {rate}")
+    for e in rep["risk_off_switches"][-10:]:
+        verdict = "FALSE ALARM" if e["false_alarm"] else "justified"
+        print(f"  {e['date']}: fwd min {e['fwd_min_return']:+.1%} -> {verdict}")
+    if rep["pending"]:
+        print(f"  pending (horizon not elapsed): {len(rep['pending'])}")
+    return 0
 
 
 def cmd_web(args) -> int:
@@ -901,6 +1075,12 @@ def main(argv=None) -> int:
     sig.add_argument("--accept-config-change", action="store_true",
                      help="Acknowledge a strategy/cost config change and continue "
                           "the track record anyway")
+    sig.add_argument("--user", default=None,
+                     help="Run this user's book with their profile-resolved "
+                          "strategy/risk/exclusions (see: survey)")
+    sig.add_argument("--all-users", action="store_true",
+                     help="Default book + every profiled user whose book is "
+                          "already started (never bootstraps a new one)")
 
     web = sub.add_parser("web",
                          help="Read-only per-user paper dashboard (display "
@@ -908,6 +1088,18 @@ def main(argv=None) -> int:
     web.add_argument("--host", default="127.0.0.1",
                      help="Bind address (default: local only)")
     web.add_argument("--port", type=int, default=8765)
+
+    sub.add_parser("regime",
+                   help="Market-regime radar: current state, flips, "
+                        "false-alarm report (display only)")
+
+    srv = sub.add_parser("survey",
+                         help="Polish risk-profile survey -> user_profiles "
+                              "(deterministic mapping, ZERO LLM)")
+    srv.add_argument("--user", required=True, help="user id, e.g. kamil")
+    srv.add_argument("--name", default=None, help="display name")
+    srv.add_argument("--answers", default=None,
+                     help="non-interactive: a,b,c,d[,sector1,sector2|-]")
 
     args = parser.parse_args(argv)
     if args.command == "ingest":
@@ -942,6 +1134,10 @@ def main(argv=None) -> int:
         return cmd_signals(args)
     if args.command == "web":
         return cmd_web(args)
+    if args.command == "regime":
+        return cmd_regime(args)
+    if args.command == "survey":
+        return cmd_survey(args)
     return 1
 
 

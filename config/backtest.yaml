@@ -66,6 +66,34 @@ universe:
 execution:
   signal_to_fill_lag_days: 1    # decide on T close, fill on next bar (no same-bar look-ahead)
 
+# Market-regime radar (Phase 3). Deterministic composite risk score in [-1, 1]
+# computed point-in-time from the benchmark + universe breadth + materialized
+# LLM verdicts (age-decayed; the LLM stays an INPUT — app/features/regime.py).
+# Strategies opt in by referencing market_* features (e.g. market_risk_on);
+# the effective regime config then joins their paper config fingerprint.
+regime:
+  trend_window: 200        # benchmark SMA anchor (sessions)
+  trend_scale: 0.10        # +/-10% vs SMA maps to component +/-1
+  vol_window: 20           # realized-vol window (sessions)
+  vol_rank_window: 252     # percentile window for the vol component
+  dd_scale: 0.20           # -20% benchmark drawdown maps to component -1
+  breadth:
+    stale_limit_sessions: 5   # names with no bar for longer leave the denominator
+    min_names: 10             # thinner breadth reads neutral
+  llm:
+    half_life_sessions: 10    # verdict weight halves every 10 sessions
+    max_age_sessions: 30      # verdicts older than this are fully expired
+    min_count: 3              # fewer active verdicts are damped toward neutral
+  weights: {trend: 0.30, breadth: 0.25, vol: 0.15, drawdown: 0.15, llm: 0.15}
+  state:
+    risk_on_above: 0.10      # hysteresis: ON only after score > +0.10
+    risk_off_below: -0.10    # OFF only after score < -0.10
+  radar:
+    enabled: true            # evening state-flip Telegram card (display only)
+    false_alarm:
+      dd_threshold: 0.05     # a risk-off is justified by a -5% benchmark move...
+      horizon_sessions: 40   # ...within 40 sessions; else it was a false alarm
+
 # Daily paper-trading loop (`make signals`, evening after `make ingest`).
 # Paper rows live under user_id 'paper:<user_id>'; costs/risk are NOT repeated
 # here on purpose — the loop reads the same costs/execution/strategy config as

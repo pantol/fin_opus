@@ -3,11 +3,12 @@
 > Living progress log for the GPW Decision System. **Update this file on every
 > implementation step** (new feature, fix, phase gate). Keep entries newest-first.
 
-**Current phase:** Phase 2 (LLM FEATURES layer) — **plumbing COMPLETE & green;
-empirical A/B verdict BLOCKED on real data.** Phase 0+1 deterministic core and the
-standalone ESPI/EBI collector remain complete. Hardening packs (A: core, B: infra,
-C: validation, D: LLM guardrails) in progress. The LLM is ALWAYS only an INPUT;
-ZERO LLM in the money path. **Tests:** 353 passing.
+**Current phase:** ALL blueprint phases (0–6) are **code-complete**; the work
+now is operations + edge-hunting. Empirical gates that need live evidence
+stay honestly open: the Phase-2 A/B verdict (weeks of filings), the Phase-3
+regime edge and the Phase-4 "≥1 academic strategy passes" (no candidate has
+cleared DSR/MC yet — the anti-luck harness refuses them correctly). The LLM
+is ALWAYS only an INPUT; ZERO LLM in the money path. **Tests:** 422 passing.
 
 ---
 
@@ -17,11 +18,12 @@ ZERO LLM in the money path. **Tests:** 353 passing.
 |-------|-------|--------|
 | 0 | Scaffold: `app/` package, config, db schema, Makefile, README | ✅ Done |
 | 1 | Data + features + 1 strategy + full risk + backtest + log + Telegram stub (no LLM) | ✅ Done |
-| 2 | LLM via OpenRouter as *features* + A/B harness | 🟨 Plumbing done; A/B improvement unproven (needs live OpenRouter + real ESPI filings) |
-| 3 | Regime radar / turning points | ⬜ Not started |
-| 4 | Academic strategies (more YAML, same engine) | ⬜ Not started |
-| 5 | Survey / user profile | ⬜ Not started |
-| 6 | Multi-tenant (promote `user_id` to auth boundary) | ⬜ Not started |
+| 2 | LLM via OpenRouter as *features* + A/B harness | ✅ Built & LIVE (deepseek-v4-flash); A/B improvement still unproven (needs weeks of filings history) |
+| 3 | Regime radar / turning points | ✅ Built (composite risk score, hysteresis state, radar card, false-alarm report); edge unproven: Sharpe/maxDD better than baseline, DSR/MC gates failed |
+| 4 | Academic strategies (more YAML, same engine) | ✅ Built (xs_momentum, week52_high, low_vol, falling_knife + xs features); exit gate NOT met — no strategy passes DSR/MC yet (honest refusal) |
+| 5 | Survey / user profile | ✅ Done (Polish survey → deterministic gating; gate met: 3 profiles → 3 behaviors) |
+| 6 | Multi-tenant (promote `user_id` to auth boundary) | ✅ Done in paper terms (per-user books/routing/isolation); Postgres+queue = documented seam; REAL second user needs the legal review first |
+| — | Window-plan Stage 1 scheduler (`make daemon`) | ✅ Done (clock, journal, digest, launchd template — install manually) |
 
 ---
 
@@ -90,7 +92,76 @@ ZERO LLM in the money path. **Tests:** 353 passing.
 
 ## Changelog (newest first)
 
-### 2026-07-23 (late evening) — Filings completeness monitor + official feeds
+### 2026-07-24 — Dashboard onboarding: user picker + LLM-assisted survey chat
+The dashboard is now the front door of Phase 5/6 (user direction): `/` is
+ALWAYS the user picker (books + profiles + "nowy użytkownik"); a fresh user
+goes through the risk survey FIRST — as a Polish conversation with the LLM
+about their investing style, or a classic form. **Tests: 433** (11 new).
+- **LLM = language layer only** (llm-provider-routing): the chat uses the
+  cheap extraction role (temp 0.0, pinned provider, budget-capped, every
+  call audited with generation id), returns STRICT validated JSON
+  ({reply, collected{5 survey fields}, done}); malformed output is REJECTED
+  (422 + form fallback, nothing guessed). Completion is decided by CODE
+  (`answers_complete`), the model's `done` is advisory; the profile preview
+  and the save both run through `clean_answers` → `build_profile` (pure
+  code, hard caps). Transcript clamped (24 msgs × 1000 chars); injection
+  posture documented.
+- **Web write boundary**: the dashboard stays read-only for money state; the
+  onboarding endpoints may write ONLY `user_profiles` + the LLM audit/cache
+  tables — pinned by a test that runs the whole flow and asserts every money
+  table byte-identical. Starting a book remains a deliberate CLI act
+  (`signals --user X`); 'default' is a reserved slug (the legacy real book
+  can never bind to a profile by accident).
+- Verified live in the browser: real deepseek-v4-flash turn mapped free-form
+  Polish ("kupuje spolki na lata") → horizon="c" and asked the next question;
+  the audit row landed in llm_calls; no profile was saved (the user answers
+  for themselves).
+- No-key mode honestly degrades: chat API returns 503 + fallback flag, the
+  deterministic form works always.
+
+### 2026-07-24 — ALL remaining phases implemented (3/4/5/6 + Stage-1 scheduler)
+One session closed every open blueprint phase; five commits, each through the
+full `make test` (+ `make backtest` where decisions were touched) gate.
+**Tests: 359 → 422.**
+- **Merged `claude/gifted-austin-d51c49`** (162ea48): same-day entry
+  candidates ranked by `llm_score` then momentum (both baseline v2 and LLM
+  strategy). NOTE: this changes the paper config fingerprint — the next real
+  `signals` run needs a one-time `--accept-config-change`.
+- **Stage-1 scheduler** (`make daemon`, `app/scheduler.py`,
+  `config/schedule.yaml`): collect/15min + intraday/5min inside 07–19,
+  digest 07:30, evening chain `ingest→llm→signals` 19:30 (llm optional —
+  never blocks the deterministic decision), health 19:45; `schedule_runs`
+  journal (PK-idempotent, in `make status`; failed evening pages); Polish
+  morning digest; monitor scoped to `paper:` books (bug fix); launchd
+  template `ops/pl.finopus.daemon.plist` (install manually).
+- **Phase 3 — regime radar** (`app/features/regime.py`, `regime:` block in
+  backtest.yaml): deterministic composite risk score (benchmark trend / vol
+  percentile / drawdown + universe breadth + age-decayed llm verdicts with
+  half-life 10 sessions, hard expiry 30 — a verdict ages out to neutral);
+  hysteresis risk_on/off; `market_*` features injected ONLY for strategies
+  that reference them; `trend_momentum_regime.yaml`; flip card; `cli regime`
+  false-alarm scoreboard. Real-data honesty: 17 flips since 2015, 75% (6/8)
+  of risk-offs were false alarms; A/B vs baseline: Sharpe −0.52→−0.43 and
+  maxDD −28.4%→−27.4% (directionally the blueprint gate) but DSR 0.02 —
+  a no-edge baseline stays no-edge.
+- **Phase 4 — strategy library**: features `mom_12_1`, `pct_52w_high` +
+  cross-sectional percentiles (`mom_12_1_pct`, `vol_xs_pct`, strategy-scoped
+  attachment); YAMLs `xs_momentum`, `week52_high`, `low_vol`,
+  `falling_knife` (user direction: stabilized-reversal). Honest gate: NONE
+  passes OOS validation (all Sharpe < 0, DSR ≈ 0) — recorded in
+  `strategy_trials`; `docs/strategy-library.md` documents catalog + results.
+- **Phase 5 — profiles**: `user_profiles` + `config/profiles.yaml` + Polish
+  `cli survey` (pure-code scoring, missing answers score cautious);
+  `apply_profile` overlays risk (multiplier, personal breaker, position cap)
+  under hard caps and stamps itself into the config fingerprint; sector
+  exclusions with membership semantics (entries never, exits always). Gate
+  MET: three profiles produce three distinct end-to-end behaviors.
+- **Phase 6 — multi-tenant**: `signals --user X` (profile-resolved strategy,
+  per-user chat via `TELEGRAM_CHAT_ID__X`), `--all-users` (never bootstraps
+  — first run stays deliberate), per-user digest routing, isolation
+  test-pinned (independent watermarks/hashes; run for A leaves B
+  byte-identical). Postgres/queue = seam; legal review before any real
+  second user.
 - **User direction: confirmed completeness + official communiques.** Live
   probe results (2026-07-23): the statutory company-ESPI wire IS PAP and we
   already ingest it (`pap_biznes`: ~24/25 window items are numbered
@@ -573,13 +644,22 @@ decision/trade/equity logging, Telegram dry-run stub, CLI, Makefile, README.
 
 ## Outstanding / blocked
 
-- _(none open)_ — `main` is pushed to `origin` and PRs #3/#4 are merged.
+- **Real book: one-time `--accept-config-change`** at the next evening run
+  (entry-ranking merge changed the fingerprint; deliberate break).
+- **Empirical gates awaiting evidence** (time, not code): Phase-2 A/B needs
+  weeks of filings; Phase-4 needs a candidate that clears DSR/MC; window-plan
+  Stage 4 (intraday decisions) needs weeks of recorded 5-min bars.
+- **Scheduler not installed as a service** — `make daemon` runs foreground;
+  launchd unit prepared in `ops/` (user installs; a sleeping laptop skips
+  slots, VPS remains the long-term home).
 
-## Next up (Phase 3 — not started)
+## Next up (operations + edge-hunting)
 
-- [ ] Regime radar / turning points: LLM as *features* feeding a deterministic
-  regime signal (still ZERO LLM in the money path). See README "Seams for later
-  phases".
-- [ ] Fill real fixtures for live use: `config/index_membership.yaml` (GPW WIG20
-  revision dates) and `config/corporate_actions.yaml` (dividends/splits/rights),
-  then decide on the adjusted-price feature switch.
+- [ ] Run the daemon daily; watch `make status` (journal + failed-evening pager).
+- [ ] Parameter studies for the library strategies through the trials
+  registry (every attempt deflates the next Sharpe — that is the point).
+- [ ] Corporate-actions + index-membership fixtures for the wider market;
+  then decide the adjusted-price feature switch.
+- [ ] Body re-fetch for empty PAP texts; PDF attachments of periodic reports.
+- [ ] Second paper book candidates: `paper:llm` (window-plan Stage 3 honest
+  live A/B) and the profiled users (kamil / dron) via `signals --user`.

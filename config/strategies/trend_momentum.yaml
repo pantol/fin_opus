@@ -2,7 +2,7 @@
 # Money/risk thresholds live HERE, not in code.
 
 name: trend_momentum
-version: 1
+version: 2
 # The tradable universe is configured in backtest.yaml (universe.mode +
 # liquidity gate + optional index membership), not per strategy.
 
@@ -15,6 +15,19 @@ entry:
     - feature: momentum_6m
       op: gt
       value: 0.0
+
+# Cross-sectional order of same-day entry candidates (v2): with a full-market
+# universe and max_open_positions slots, the book must admit the STRONGEST
+# rule-passers, not the lowest instrument ids. Keys apply lexicographically;
+# names missing a feature (e.g. no LLM verdict yet) sort AFTER scored ones on
+# that key, then fall through to the next; full ties keep instrument-id order.
+# llm_score is the pre-materialized point-in-time feature (llm_features rows,
+# as-of <= T) — an INPUT read by deterministic code, never an LLM call.
+entry_ranking:
+  - feature: llm_score     # analysis verdict first (scored names outrank unscored)
+    order: desc
+  - feature: momentum_6m   # strength tiebreak; primary key for unscored names
+    order: desc
 
 # Exit: ATR trailing stop OR trend break (close < SMA200).
 exit:

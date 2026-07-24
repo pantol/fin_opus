@@ -441,6 +441,62 @@ Signal / fill / lapse cards are sent AFTER commit with at-least-once delivery
 portfolio-summary card is best-effort) — alerting can never touch money
 state. Cron example (Warsaw): `30 19 * * 1-5  cd /opt/fin_opus && make signals`.
 
+### 9. Working-window scheduler (`make daemon`)
+
+One process replaces the crontab (Stage 1 of `docs/plan-window-7-19.md`):
+`app/scheduler.py` reads `config/schedule.yaml` and fires the existing
+one-shot jobs at their slots — `collect` every 15 min and the intraday
+recorder/monitor every 5 min inside the 07:00–19:00 window, the Polish
+**morning digest** at 07:30 (positions vs stops, pending orders, fresh
+filings + LLM verdicts), the **evening decision chain** `ingest → llm →
+signals` at 19:30 (anchored outside the window on purpose — the GPW session
+file lands ~19:00), and `status → backup` at 19:45.
+
+Every fired slot is journaled in `schedule_runs` (visible in `make status`);
+the journal's primary key makes slots idempotent across restarts. A missed
+`at` slot (sleeping laptop) still fires later the same day; missed `every_min`
+slots collapse to the latest one, older ones are journaled `skipped`. A
+failing `llm` step never blocks `signals` (missing scores fail LLM-gated
+entries closed); a failing `ingest` stops the chain. The scheduler NEVER
+passes `--accept-config-change` — a config-fingerprint break always needs a
+human. Zero decision changes: the clock only runs the same commands you would
+run by hand.
+
+```bash
+make daemon                        # foreground (Ctrl-C to stop)
+python -m app.scheduler --once     # single pass: fire what is due, exit
+```
+
+To keep it running on a Mac, install the launchd unit (adjust paths inside
+first): `cp ops/pl.finopus.daemon.plist ~/Library/LaunchAgents/ && launchctl
+load ~/Library/LaunchAgents/pl.finopus.daemon.plist`. Caveat: a sleeping
+laptop skips slots (jobs catch up); a VPS is the long-term home.
+
+### 10. Profiles + multiple users (Phases 5-6)
+
+```bash
+python -m app.cli survey --user dron          # Polish risk survey -> profile
+python -m app.cli signals --user dron         # deliberate first run = bootstrap
+python -m app.cli signals --all-users         # default book + every STARTED book
+```
+
+The survey maps answers **in pure code** (ZERO LLM) to a tolerance bucket
+(`config/profiles.yaml`): the user's strategy YAML, a risk_per_trade
+multiplier, a personal drawdown breaker, a position cap and excluded sectors
+— all bounded by hard caps no answer can pierce (max 2% risk/trade, breaker
+<= 40%, no leverage). `signals --user X` overlays X's profile onto their
+strategy (the overlay is stamped into the config, so it is part of X's
+config fingerprint), excludes their sectors from NEW entries (exits always
+evaluate) and routes cards to `TELEGRAM_CHAT_ID__X` (fallback: the shared
+`TELEGRAM_CHAT_ID`). Every book lives under `user_id 'paper:<user>'` in the
+shared tables — watermarks, positions, orders and equity are fully isolated
+(`tests/test_multitenant.py`). The scheduler's evening chain runs
+`signals --all-users`, which never bootstraps a new book: a user's first run
+is always a deliberate manual `signals --user X`. The `make web` dashboard
+is already per-user. Postgres/queue stay a documented seam (simple monolith
+rule); giving signals to OTHER PEOPLE has regulatory weight — see the
+blueprint's legal section before any second REAL user.
+
 ## Project structure
 
 Visual map of the whole repo — architecture + daily-cycle Mermaid diagrams, DB
@@ -708,15 +764,23 @@ vs **WIG20TR +147%** — much lower drawdown, far lower return. The plumbing is
 sound; the strategy has no proven edge yet. The A/B LLM comparison needs weeks
 of collected filings before it can say anything (RSS has no backfill).
 
-## Seams for later phases (not built yet)
+## Remaining seams (deliberately not built)
 
-- **Walk-forward parameter fitting** — the IS/OOS machinery exists but Phase-1
-  parameters are fixed constants, so fitting is currently a documented no-op.
-- **Adjusted-price features** — the adjusted series is derived (`make refdata`)
-  but features still read raw prices; switching them is a one-line change with
-  system-wide metric consequences, deferred deliberately.
-- **Phase 3 — regime radar / turning points. Phase 4 — academic strategies
-  (more YAMLs; same engine). Phase 5 — survey/profile. Phase 6 — multi-tenant
-  auth** (the `user_id` column already threads everywhere).
+All blueprint phases (0–6) are implemented — regime radar (`cli regime`),
+strategy library (`docs/strategy-library.md`), profiles (`cli survey`),
+multi-tenant books (`signals --user / --all-users`), and the window-plan
+Stage-1 scheduler (`make daemon`). What stays a documented seam:
+
+- **Walk-forward parameter fitting** — the IS/OOS machinery exists but
+  strategy parameters are fixed constants, so fitting is a documented no-op.
+- **Adjusted-price features** — the adjusted series is derived
+  (`make refdata`) but features still read raw prices; a one-line switch
+  with system-wide metric consequences, deferred deliberately.
+- **Postgres/TimescaleDB + queue** — the schema is portable by design;
+  migration waits for a real need (simple-monolith rule).
+- **Intraday decisions** (window-plan Stage 4) — gated on weeks of recorded
+  5-minute bars plus an intraday backtest with the 15-min-delay fill model.
+- **LLM PDF→spec strategy drafts** — the YAML DSL is the contract; a draft
+  generator changes nothing about the validation gate.
 
 **Real/live trading is forbidden — paper only.**

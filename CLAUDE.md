@@ -55,8 +55,8 @@ A decision-support system for investing on the GPW (Warsaw Stock Exchange; later
 - Build incrementally; test everything that touches money or time.
 - Implement only the current phase — leave clean seams for future ones.
 
-## Phase scope (context — not to build all at once)
+## Phase scope (context)
 - **Phase 0+1:** data + features + 1 strategy + full risk + backtest + log + Telegram stub (**no LLM**).
 - **Phases 2+:** LLM via OpenRouter as features → regime radar / turning points → academic strategies → survey/profile → multi-tenant.
 
-**Current phase: Phase 0+1.**
+**Current phase: all blueprint phases (0–6) implemented — operations + edge-hunting.** Empirical gates still open (report honestly, never fake): Phase-2 A/B needs weeks of filings; no strategy has yet passed the DSR/MC validation gates. See PROGRESS.md.

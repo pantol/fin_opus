@@ -26,7 +26,8 @@ from app.backtest import fills as fillmod
 from app.backtest import metrics as metricsmod
 from app.features import compute
 from app.risk import manager as risk
-from app.strategy.engine import EvalContext, Signal, evaluate
+from app.strategy.engine import (EvalContext, Signal, entry_rank_key,
+                                 entry_ranking_spec, evaluate)
 
 
 @dataclass
@@ -358,6 +359,7 @@ def run_backtest(
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
     membership: dict[int, list[tuple]] | None = None,
+    excluded_sectors: frozenset[str] | None = None,
 ) -> BacktestResult:
     """Run the event-driven simulation over [start, end] (OOS window).
 
@@ -365,6 +367,10 @@ def run_backtest(
     instrument_id (see load_membership_map). When given, NEW entries are only
     evaluated for instruments that are members as of T; exits on held
     positions always run so a removed member can still be sold.
+
+    `excluded_sectors` (optional, Phase 5 profiles): NEW entries are never
+    evaluated for these sectors; exits on held positions always run — the
+    same semantics as the membership gate.
     """
     seed = int(bt_cfg.get("seed", 42))
     random.seed(seed)
@@ -380,6 +386,18 @@ def run_backtest(
         )
     atr_mult = float(risk_cfg["atr_mult_stop"])
     liq_gate = liquidity_gate(bt_cfg)
+    rank_spec = entry_ranking_spec(strategy_cfg)  # validated once, up front
+    # Market-regime features (Phase 3): computed HERE, deterministically, over
+    # the full loaded history (each row uses only data <= its date, so passing
+    # the whole frame is point-in-time safe; warmup rows are absent and fail
+    # entry conditions closed). Only strategies that reference market_*
+    # features pay the cost — and only they see the injected keys, so
+    # baseline snapshots stay byte-identical.
+    market_features = None
+    if strategy_uses_market_features(strategy_cfg):
+        from app.features import regime as regime_mod
+        market_features = regime_mod.compute_market_features(
+            instruments, benchmark_close, bt_cfg)
     views = build_feature_views(instruments)
 
     calendar = _trading_calendar(instruments)
@@ -482,7 +500,19 @@ def run_backtest(
         fill_index = di + lag
 
         # --- 3. evaluate signals on each instrument's close at T ---
+        # Two passes: the instrument sweep queues EXITs immediately (exits are
+        # never ranked) and only COLLECTS entry candidates; sizing then runs
+        # over the candidates in cross-sectional `entry_ranking` order, so a
+        # full book admits the strongest names, not the lowest instrument ids.
+        # Exits never touch `state`, so deferring entry sizing changes nothing
+        # but the entry order. Without entry_ranking the candidate list keeps
+        # the sweep order (instrument id) — the legacy behavior.
         day_ns = int(day.value)
+        market_snap = None
+        if market_features is not None:
+            from app.features import regime as regime_mod
+            market_snap = regime_mod.frame_asof(market_features, day)
+        entry_candidates: list[tuple[Instrument, dict, float, float]] = []
         for inst in instruments:
             if not _alive(inst, day):
                 continue
@@ -494,6 +524,11 @@ def run_backtest(
             if (membership is not None
                     and not in_pos
                     and not _member_on(membership.get(inst.instrument_id), day)):
+                continue
+            # Profile sector exclusion (Phase 5): same shape as membership —
+            # no NEW entries, exits on held positions still evaluate.
+            if (excluded_sectors and not in_pos
+                    and inst.sector in excluded_sectors):
                 continue
             view = views[inst.ticker]
             idx = _view_asof_idx(view, day_ns)
@@ -520,6 +555,9 @@ def run_backtest(
             llm_relevance = _series_asof(inst.llm_relevance, day)
             if llm_relevance is not None:
                 snap["llm_relevance"] = llm_relevance
+            # Market regime as plain features (same day for every instrument).
+            if market_snap:
+                snap.update(market_snap)
 
             pos = positions.get(inst.ticker)
             ctx = EvalContext(
@@ -534,24 +572,7 @@ def run_backtest(
                 atr_val = snap.get("atr")
                 if not atr_val:
                     continue
-                sizing = risk.size_position(
-                    entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
-                    ticker=inst.ticker, sector=inst.sector,
-                )
-                if not sizing.accepted:
-                    continue
-                pending_orders.append({
-                    "side": "BUY", "ticker": inst.ticker, "qty": sizing.qty,
-                    "stop_price": sizing.stop_price, "fill_on_index": fill_index,
-                    "decision_date": day.date().isoformat(), "features": snap,
-                })
-                pending_buys[inst.ticker] = pending_orders[-1]
-                # reserve exposure within the same day to avoid over-allocating
-                est_cost = close * sizing.qty
-                state.exposure_by_name[inst.ticker] = state.exposure_by_name.get(inst.ticker, 0.0) + est_cost
-                if inst.sector is not None:
-                    state.exposure_by_sector[inst.sector] = state.exposure_by_sector.get(inst.sector, 0.0) + est_cost
-                state.open_positions += 1
+                entry_candidates.append((inst, snap, close, atr_val))
 
             elif sig == Signal.EXIT and in_pos and not has_pending_sell:
                 pending_orders.append({
@@ -560,6 +581,30 @@ def run_backtest(
                     "features": snap,
                 })
                 pending_sells.add(inst.ticker)
+
+        # --- 3b. size ranked entry candidates (risk layer, deterministic) ---
+        if rank_spec:
+            # Stable sort: candidates tied on every key keep instrument order.
+            entry_candidates.sort(key=lambda c: entry_rank_key(rank_spec, c[1]))
+        for inst, snap, close, atr_val in entry_candidates:
+            sizing = risk.size_position(
+                entry_price=close, atr=atr_val, state=state, risk_cfg=risk_cfg,
+                ticker=inst.ticker, sector=inst.sector,
+            )
+            if not sizing.accepted:
+                continue
+            pending_orders.append({
+                "side": "BUY", "ticker": inst.ticker, "qty": sizing.qty,
+                "stop_price": sizing.stop_price, "fill_on_index": fill_index,
+                "decision_date": day.date().isoformat(), "features": snap,
+            })
+            pending_buys[inst.ticker] = pending_orders[-1]
+            # reserve exposure within the same day to avoid over-allocating
+            est_cost = close * sizing.qty
+            state.exposure_by_name[inst.ticker] = state.exposure_by_name.get(inst.ticker, 0.0) + est_cost
+            if inst.sector is not None:
+                state.exposure_by_sector[inst.sector] = state.exposure_by_sector.get(inst.sector, 0.0) + est_cost
+            state.open_positions += 1
 
     # --- close any open positions at the final available close (paper) ---
     # Apply realistic exit costs on the forced close (consistent with live exits).
@@ -831,10 +876,11 @@ def _series_asof(series: pd.Series | None, day: pd.Timestamp):
 
 
 def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
-    """True if any condition references an `llm_*` feature (llm_score,
-    llm_relevance, ...). Used to decide whether to attach materialized LLM
-    features before a backtest (so an LLM strategy is not silently starved of
-    its gate).
+    """True if any condition OR entry-ranking key references an `llm_*` feature
+    (llm_score, llm_relevance, ...). Used to decide whether to attach
+    materialized LLM features before a backtest (so an LLM strategy is not
+    silently starved of its gate — and a ranking-only user of llm_score is not
+    silently degraded to its momentum tiebreak).
     """
     def _walk(node) -> bool:
         if isinstance(node, dict):
@@ -846,7 +892,40 @@ def strategy_uses_llm_features(strategy_cfg: dict) -> bool:
             return any(_walk(v) for v in node)
         return False
 
-    return _walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+    return (_walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+            or _walk(strategy_cfg.get("entry_ranking")))
+
+
+def strategy_uses_market_features(strategy_cfg: dict) -> bool:
+    """True if any condition or ranking key references a `market_*` regime
+    feature (market_risk_score, market_risk_on, ...). Decides whether the
+    engine computes+injects the market-regime frame — strategies that never
+    mention it keep byte-identical snapshots."""
+    def _walk(node) -> bool:
+        if isinstance(node, dict):
+            feat = node.get("feature")
+            if isinstance(feat, str) and feat.startswith("market_"):
+                return True
+            return any(_walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_walk(v) for v in node)
+        return False
+
+    return (_walk(strategy_cfg.get("entry")) or _walk(strategy_cfg.get("exit"))
+            or _walk(strategy_cfg.get("entry_ranking")))
+
+
+def needs_llm_attach(strategy_cfg: dict, bt_cfg: dict) -> bool:
+    """True when materialized llm_scores must be attached before running this
+    strategy: it gates/ranks on llm_* directly, OR it uses market_* features
+    and the regime model's llm component carries weight (a regime computed
+    without attached verdicts would silently read neutral)."""
+    if strategy_uses_llm_features(strategy_cfg):
+        return True
+    if strategy_uses_market_features(strategy_cfg):
+        from app.features import regime as regime_mod
+        return regime_mod.needs_llm(bt_cfg)
+    return False
 
 
 # Backwards-compatible aliases (pre-Pack-D names).
@@ -860,6 +939,21 @@ _apply_action_to_order = apply_action_to_order
 
 def _llm_score_on(inst: Instrument, day: pd.Timestamp):
     return _series_asof(inst.llm_scores, day)
+
+
+def prepare_strategy_inputs(conn, instruments: list[Instrument],
+                            strategy_cfg: dict, bt_cfg: dict) -> list[Instrument]:
+    """Attach every optional input THIS strategy references: materialized LLM
+    scores (DB read, no LLM call) and derived cross-sectional percentiles.
+    Strategies that reference neither get the instruments back untouched, so
+    their snapshots stay byte-identical."""
+    from app.features import cross_sectional as xs
+
+    if needs_llm_attach(strategy_cfg, bt_cfg):
+        instruments = attach_llm_scores(conn, instruments)
+    if xs.strategy_uses_cross_sectional(strategy_cfg):
+        instruments = xs.attach_cross_sectional(instruments)
+    return instruments
 
 
 def attach_llm_scores(conn, instruments: list[Instrument]) -> list[Instrument]:
@@ -1016,6 +1110,7 @@ def run_walk_forward(
     bt_cfg: dict,
     *,
     membership: dict[int, list[tuple]] | None = None,
+    excluded_sectors: frozenset[str] | None = None,
 ) -> BacktestResult:
     """Walk-forward OOS evaluation as ONE continuous simulation.
 
@@ -1042,7 +1137,8 @@ def run_walk_forward(
         # This is NOT out-of-sample; flag it so reports and the trials registry
         # cannot silently present full-history metrics as OOS evidence.
         result = run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg,
-                              membership=membership)
+                              membership=membership,
+                              excluded_sectors=excluded_sectors)
         result.metrics["walk_forward_windows"] = 0
         return result
 
@@ -1051,6 +1147,7 @@ def run_walk_forward(
     result = run_backtest(
         instruments, benchmark_close, strategy_cfg, bt_cfg,
         start=oos_start, end=oos_end, membership=membership,
+        excluded_sectors=excluded_sectors,
     )
     result.metrics["walk_forward_windows"] = len(windows)
     return result

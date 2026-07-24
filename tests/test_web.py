@@ -112,7 +112,9 @@ def test_index_lists_every_user(client):
     assert "trend_momentum" in html
 
 
-def test_single_user_index_redirects(tmp_path):
+def test_single_user_index_still_shows_the_picker(tmp_path):
+    # The picker is ALWAYS the entry page (onboarding flow): even a one-book
+    # database must offer user selection + the new-user survey path.
     path = tmp_path / "solo.db"
     conn = connect(path)
     init_db(conn)
@@ -126,11 +128,11 @@ def test_single_user_index_redirects(tmp_path):
     app = create_app(path, benchmark_ticker="wig20tr")
     app.testing = True
     c = app.test_client()
-    assert c.get("/").status_code == 302
-    followed = c.get("/", follow_redirects=True)
-    assert followed.status_code == 200
-    assert "paper:solo" in followed.get_data(as_text=True)
-    assert c.get("/?stay=1").status_code == 200  # breadcrumb escape hatch
+    resp = c.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "paper:solo" in html
+    assert "Nowy użytkownik" in html
 
 
 def test_user_dashboard_renders_book(client):

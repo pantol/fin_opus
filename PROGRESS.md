@@ -92,6 +92,33 @@ is ALWAYS only an INPUT; ZERO LLM in the money path. **Tests:** 422 passing.
 
 ## Changelog (newest first)
 
+### 2026-07-24 — Dashboard onboarding: user picker + LLM-assisted survey chat
+The dashboard is now the front door of Phase 5/6 (user direction): `/` is
+ALWAYS the user picker (books + profiles + "nowy użytkownik"); a fresh user
+goes through the risk survey FIRST — as a Polish conversation with the LLM
+about their investing style, or a classic form. **Tests: 433** (11 new).
+- **LLM = language layer only** (llm-provider-routing): the chat uses the
+  cheap extraction role (temp 0.0, pinned provider, budget-capped, every
+  call audited with generation id), returns STRICT validated JSON
+  ({reply, collected{5 survey fields}, done}); malformed output is REJECTED
+  (422 + form fallback, nothing guessed). Completion is decided by CODE
+  (`answers_complete`), the model's `done` is advisory; the profile preview
+  and the save both run through `clean_answers` → `build_profile` (pure
+  code, hard caps). Transcript clamped (24 msgs × 1000 chars); injection
+  posture documented.
+- **Web write boundary**: the dashboard stays read-only for money state; the
+  onboarding endpoints may write ONLY `user_profiles` + the LLM audit/cache
+  tables — pinned by a test that runs the whole flow and asserts every money
+  table byte-identical. Starting a book remains a deliberate CLI act
+  (`signals --user X`); 'default' is a reserved slug (the legacy real book
+  can never bind to a profile by accident).
+- Verified live in the browser: real deepseek-v4-flash turn mapped free-form
+  Polish ("kupuje spolki na lata") → horizon="c" and asked the next question;
+  the audit row landed in llm_calls; no profile was saved (the user answers
+  for themselves).
+- No-key mode honestly degrades: chat API returns 503 + fallback flag, the
+  deterministic form works always.
+
 ### 2026-07-24 — ALL remaining phases implemented (3/4/5/6 + Stage-1 scheduler)
 One session closed every open blueprint phase; five commits, each through the
 full `make test` (+ `make backtest` where decisions were touched) gate.

@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}Ankieta profilu — {{ user or "nowy użytkownik" }}{% endblock %}
+{% block content %}
+<div class="crumbs"><a href="/">← wybór użytkownika</a></div>
+
+<div class="card">
+  <h2>Ankieta profilu ryzyka{% if user %}: <strong>{{ user }}</strong>{% endif %}
+    <span class="hint">— paper trading, żadnych prawdziwych pieniędzy</span></h2>
+  {% if error %}<p class="ob-error">{{ error }}</p>{% endif %}
+  {% if existing %}
+  <p class="empty">Ten użytkownik ma już profil
+    (<span class="badge plain">{{ existing.risk_tolerance }}</span>,
+    strategia {{ existing.strategy }}). Ponowna ankieta nadpisze go —
+    zmiana profilu na działającej księdze to świadome zerwanie ciągłości
+    (<code>--accept-config-change</code>).</p>
+  {% endif %}
+  <p class="empty">Model językowy tylko prowadzi rozmowę i porządkuje odpowiedzi.
+  Profil (strategia, mnożnik ryzyka, bezpiecznik obsunięcia, wykluczenia)
+  wylicza wyłącznie deterministyczny kod z twardymi limitami. Model niczego
+  nie doradza i nie decyduje o pieniądzach.</p>
+</div>
+
+{% if user %}
+{% if llm_available %}
+<div class="card" id="chat-card">
+  <h2>Rozmowa <span class="hint">— odpowiadaj swobodnie, po polsku</span></h2>
+  <div id="chatlog" class="chatlog" aria-live="polite"></div>
+  <form id="chatform" class="chatform">
+    <input type="text" id="chatinput" maxlength="1000" autocomplete="off"
+           placeholder="Napisz odpowiedź..." aria-label="odpowiedź">
+    <button type="submit" id="chatsend">Wyślij</button>
+  </form>
+  <div id="chatstatus" class="sub"></div>
+  <div id="preview" class="preview" hidden>
+    <h3>Podsumowanie profilu (wyliczone przez kod)</h3>
+    <dl id="previewlist"></dl>
+    <button id="savebtn">Zapisz profil ✓</button>
+  </div>
+</div>
+{% endif %}
+
+<div class="card" id="form-card">
+  <h2>{% if llm_available %}Wolisz klasyczny formularz?{% else %}Formularz ankiety
+    <span class="hint">— tryb bez LLM (brak OPENROUTER_API_KEY)</span>{% endif %}</h2>
+  <form id="surveyform">
+    {% for q in survey %}
+    <fieldset class="q">
+      <legend>{{ q.question }}</legend>
+      {% if q.options %}
+        {% for key, opt in q.options.items() %}
+        <label><input type="radio" name="{{ q.id }}" value="{{ key }}" required>
+          {{ key }}) {{ opt[0] }}</label>
+        {% endfor %}
+      {% else %}
+        <input type="text" name="{{ q.id }}" maxlength="200"
+               placeholder="np. banking,energy — puste = żadne">
+      {% endif %}
+    </fieldset>
+    {% endfor %}
+    <button type="submit">Zapisz profil ✓</button>
+    <span id="formstatus" class="sub"></span>
+  </form>
+</div>
+
+<style>
+  .ob-error { color: var(--delta-down); }
+  .chatlog { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px;
+             max-height: 420px; overflow-y: auto; }
+  .msg { padding: 8px 12px; border-radius: 10px; max-width: 78%;
+         white-space: pre-wrap; }
+  .msg.assistant { background: color-mix(in srgb, var(--series-1) 10%, transparent);
+                   align-self: flex-start; }
+  .msg.user { background: color-mix(in srgb, var(--series-2) 10%, transparent);
+              align-self: flex-end; }
+  .chatform { display: flex; gap: 8px; }
+  .chatform input { flex: 1; background: var(--plane); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font: inherit; }
+  .chatform button, .preview button, #surveyform button {
+    background: var(--series-1); color: #fff; border: none; border-radius: 8px;
+    padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  .chatform button[disabled] { opacity: .5; cursor: default; }
+  .preview { border-top: 1px solid var(--grid); margin-top: 12px; padding-top: 10px; }
+  .preview h3 { font-size: 14px; margin: 0 0 8px; }
+  .preview dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+                font-size: 14px; margin: 0 0 10px; }
+  .preview dt { color: var(--text-muted); }
+  fieldset.q { border: 1px solid var(--grid); border-radius: 8px;
+               margin: 0 0 10px; padding: 10px 14px; }
+  fieldset.q legend { font-weight: 600; font-size: 14px; padding: 0 6px; }
+  fieldset.q label { display: block; padding: 3px 0; }
+  fieldset.q input[type=text] { width: 100%; background: var(--plane);
+    color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font: inherit; }
+</style>
+
+<script>
+(function () {
+  var user = {{ user | tojson }};
+  var transcript = [];          // [{role, content}] — server re-derives state
+  var lastCollected = null;
+  var log = document.getElementById("chatlog");
+
+  function addMsg(role, text) {
+    var el = document.createElement("div");
+    el.className = "msg " + role;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function postJSON(url, body) {
+    return fetch(url, {method: "POST",
+                       headers: {"Content-Type": "application/json"},
+                       body: JSON.stringify(body)})
+      .then(function (r) { return r.json().then(function (j) {
+        return {status: r.status, body: j}; }); });
+  }
+
+  function saveProfile(answers, source, statusEl) {
+    statusEl.textContent = "Zapisywanie...";
+    postJSON("/api/onboarding/" + user + "/save",
+             {answers: answers, source: source}).then(function (res) {
+      if (res.body.ok) {
+        statusEl.textContent = res.body.book_started
+          ? "Zapisano — przechodzę do portfela."
+          : "Zapisano. Księgę wystartujesz świadomie: signals --user " + user;
+        setTimeout(function () { window.location = res.body.redirect; }, 1400);
+      } else {
+        statusEl.textContent = "Błąd: " + (res.body.error || res.status);
+      }
+    });
+  }
+
+  var chatCard = document.getElementById("chat-card");
+  if (chatCard) {
+    var input = document.getElementById("chatinput");
+    var send = document.getElementById("chatsend");
+    var status = document.getElementById("chatstatus");
+    var preview = document.getElementById("preview");
+    addMsg("assistant", {{ opening | tojson }});
+
+    document.getElementById("chatform").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var text = input.value.trim();
+      if (!text) return;
+      addMsg("user", text);
+      transcript.push({role: "user", content: text});
+      input.value = "";
+      send.disabled = true;
+      status.textContent = "Model porządkuje odpowiedź...";
+      postJSON("/api/onboarding/" + user + "/chat",
+               {transcript: transcript}).then(function (res) {
+        send.disabled = false;
+        status.textContent = "";
+        if (res.body.fallback) {
+          status.textContent = res.body.reason +
+            " (formularz poniżej działa zawsze)";
+          return;
+        }
+        if (!res.body.reply) {
+          status.textContent = "Błąd: " + (res.body.error || res.status);
+          return;
+        }
+        addMsg("assistant", res.body.reply);
+        transcript.push({role: "assistant", content: res.body.reply});
+        lastCollected = res.body.collected;
+        if (res.body.complete && res.body.preview) {
+          var p = res.body.preview;
+          document.getElementById("previewlist").innerHTML =
+            "<dt>Profil</dt><dd>" + p.risk_tolerance_pl + " (" + p.risk_tolerance + ")</dd>" +
+            "<dt>Strategia</dt><dd>" + p.strategy + "</dd>" +
+            "<dt>Mnożnik ryzyka</dt><dd>×" + p.risk_multiplier + "</dd>" +
+            "<dt>Maks. obsunięcie</dt><dd>" + Math.round(p.max_drawdown_pct * 100) + "%</dd>" +
+            "<dt>Wykluczenia</dt><dd>" + (p.excluded_sectors.join(", ") || "brak") + "</dd>";
+          preview.hidden = false;
+          preview.dataset.answers = JSON.stringify(p.answers);
+        }
+      });
+    });
+
+    document.getElementById("savebtn").addEventListener("click", function () {
+      saveProfile(JSON.parse(preview.dataset.answers || "{}"), "llm_chat", status);
+    });
+  }
+
+  document.getElementById("surveyform").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var f = new FormData(e.target);
+    saveProfile({horizon: f.get("horizon"), reaction: f.get("reaction"),
+                 max_loss: f.get("max_loss"), experience: f.get("experience"),
+                 exclusions: f.get("exclusions") || ""},
+                "form", document.getElementById("formstatus"));
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -359,6 +359,7 @@ def run_backtest(
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
     membership: dict[int, list[tuple]] | None = None,
+    excluded_sectors: frozenset[str] | None = None,
 ) -> BacktestResult:
     """Run the event-driven simulation over [start, end] (OOS window).
 
@@ -366,6 +367,10 @@ def run_backtest(
     instrument_id (see load_membership_map). When given, NEW entries are only
     evaluated for instruments that are members as of T; exits on held
     positions always run so a removed member can still be sold.
+
+    `excluded_sectors` (optional, Phase 5 profiles): NEW entries are never
+    evaluated for these sectors; exits on held positions always run — the
+    same semantics as the membership gate.
     """
     seed = int(bt_cfg.get("seed", 42))
     random.seed(seed)
@@ -519,6 +524,11 @@ def run_backtest(
             if (membership is not None
                     and not in_pos
                     and not _member_on(membership.get(inst.instrument_id), day)):
+                continue
+            # Profile sector exclusion (Phase 5): same shape as membership —
+            # no NEW entries, exits on held positions still evaluate.
+            if (excluded_sectors and not in_pos
+                    and inst.sector in excluded_sectors):
                 continue
             view = views[inst.ticker]
             idx = _view_asof_idx(view, day_ns)
@@ -1100,6 +1110,7 @@ def run_walk_forward(
     bt_cfg: dict,
     *,
     membership: dict[int, list[tuple]] | None = None,
+    excluded_sectors: frozenset[str] | None = None,
 ) -> BacktestResult:
     """Walk-forward OOS evaluation as ONE continuous simulation.
 
@@ -1126,7 +1137,8 @@ def run_walk_forward(
         # This is NOT out-of-sample; flag it so reports and the trials registry
         # cannot silently present full-history metrics as OOS evidence.
         result = run_backtest(instruments, benchmark_close, strategy_cfg, bt_cfg,
-                              membership=membership)
+                              membership=membership,
+                              excluded_sectors=excluded_sectors)
         result.metrics["walk_forward_windows"] = 0
         return result
 
@@ -1135,6 +1147,7 @@ def run_walk_forward(
     result = run_backtest(
         instruments, benchmark_close, strategy_cfg, bt_cfg,
         start=oos_start, end=oos_end, membership=membership,
+        excluded_sectors=excluded_sectors,
     )
     result.metrics["walk_forward_windows"] = len(windows)
     return result

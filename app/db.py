@@ -348,6 +348,25 @@ CREATE TABLE IF NOT EXISTS intraday_alerts (
     UNIQUE (position_id, session_date, state)
 );
 
+-- Phase 5: user risk profiles (survey -> deterministic gating). The survey
+-- answers are stored verbatim (reproducibility); every derived knob is
+-- computed by code from config/profiles.yaml — ZERO LLM anywhere near this.
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id          TEXT PRIMARY KEY,
+    display_name     TEXT,
+    risk_tolerance   TEXT NOT NULL
+                     CHECK (risk_tolerance IN ('conservative', 'balanced', 'aggressive')),
+    max_drawdown_pct REAL NOT NULL,      -- personal circuit-breaker (fraction)
+    risk_multiplier  REAL NOT NULL,      -- scales strategy risk_per_trade (capped)
+    max_positions    INTEGER,            -- NULL = strategy default
+    excluded_sectors TEXT NOT NULL DEFAULT '[]',  -- JSON array of sector names
+    strategy         TEXT NOT NULL,      -- config/strategies/<name>.yaml
+    initial_capital  REAL,               -- NULL = paper default
+    survey_json      TEXT,               -- raw answers, verbatim
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+
 -- Scheduler journal (app/scheduler.py, `make daemon`): one row per fired job
 -- slot. The PRIMARY KEY is the idempotency guard — a slot claimed is a slot
 -- spent, so a daemon restart can never double-run a job. status: running /

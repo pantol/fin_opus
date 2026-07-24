@@ -159,14 +159,21 @@ def run_signals(
     accept_config_change: bool = False,
     dry_run: bool = False,
     send_fn=telegram.send_text,
+    user: str | None = None,
+    excluded_sectors: frozenset[str] | None = None,
+    initial_capital: float | None = None,
 ) -> tuple[int, PaperRunReport]:
     """One evening run. Returns (exit_code, report).
 
     `session_end` (ISO date) clamps the calendar — an ops/test hook, never a
     way to peek forward (fills always use only bars of the processed session).
     `dry_run` processes everything in one transaction and rolls it back.
+    `user` overrides bt_cfg's user_id (multi-tenant books: paper:<user>);
+    `excluded_sectors` / `initial_capital` come from the user's profile
+    (Phase 5) — the caller applies the profile to strategy_cfg BEFORE calling,
+    so the config fingerprint covers it.
     """
-    user_id = store.paper_user_id(str(bt_cfg["user_id"]))
+    user_id = store.paper_user_id(str(user or bt_cfg["user_id"]))
     report = PaperRunReport(status="refused", user_id=user_id, dry_run=dry_run)
 
     lag = int(bt_cfg.get("execution", {}).get("signal_to_fill_lag_days", 1))
@@ -295,7 +302,10 @@ def run_signals(
         last_settled = (before[-1].date().isoformat() if len(before)
                         else (latest.date() - timedelta(days=1)).isoformat())
         store.init_state(
-            conn, user_id=user_id, initial_capital=float(paper_cfg["initial_capital"]),
+            conn, user_id=user_id,
+            initial_capital=float(initial_capital
+                                  if initial_capital is not None
+                                  else paper_cfg["initial_capital"]),
             inception_date=latest.date().isoformat(), last_settled_date=last_settled,
             strategy_id=strategy_id, config_hash=chash,
         )
@@ -392,6 +402,7 @@ def run_signals(
                 warnings=report.warnings, views=views, liq_gate=liq_gate,
                 rank_spec=rank_spec,
                 market_features=market_features if uses_market else None,
+                excluded_sectors=excluded_sectors,
             )
             store.save_state(conn, user_id=user_id, cash=cash, peak_equity=peak_equity,
                              last_settled_date=day.date().isoformat())
@@ -440,6 +451,7 @@ def _process_session(
     conn, *, day, prev_day, user_id, strategy_id, instruments, inst_by_ticker,
     inst_by_id, membership, strategy_cfg, risk_cfg, costs, atr_mult, cash,
     peak_equity, warnings, views, liq_gate, rank_spec, market_features=None,
+    excluded_sectors: frozenset[str] | None = None,
 ) -> tuple[float, float, SessionResult]:
     """Settle -> mark -> decide for one session, mirroring the engine loop."""
     day_iso = day.date().isoformat()
@@ -636,6 +648,9 @@ def _process_session(
         if (membership is not None
                 and not in_pos
                 and not engine._member_on(membership.get(inst.instrument_id), day)):
+            continue
+        # Profile sector exclusion (engine parity): entries never, exits always.
+        if excluded_sectors and not in_pos and inst.sector in excluded_sectors:
             continue
         view = views[inst.ticker]
         idx = engine._view_asof_idx(view, day_ns)

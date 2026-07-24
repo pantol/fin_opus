@@ -767,6 +767,65 @@ def cmd_signals(args) -> int:
     return code
 
 
+def cmd_survey(args) -> int:
+    """Polish risk-profile survey (Phase 5). ZERO LLM: answers map to a
+    tolerance bucket + gating knobs in pure code (config/profiles.yaml).
+
+    Interactive by default; `--answers a,b,c,d,banking` fills the five
+    questions non-interactively (last field = comma-free sector list, use
+    '-' for none)."""
+    from app.users import profiles as prof
+
+    profiles_cfg = cfg.load_profiles_config()
+    answers: dict = {}
+    if args.answers:
+        parts = [p.strip() for p in args.answers.split(",")]
+        scored = [q for q in prof.SURVEY if q["options"]]
+        if len(parts) < len(scored):
+            print(f"--answers needs {len(scored)} scored answers + optional "
+                  "exclusions, e.g. a,b,c,d,banking (use '-' for none)")
+            return 1
+        for q, p in zip(scored, parts):
+            answers[q["id"]] = p.lower()
+        exclusions = parts[len(scored):]
+        answers["exclusions"] = ",".join(
+            e for e in exclusions if e and e != "-")
+    else:
+        print("Ankieta profilu ryzyka (paper). Odpowiadaj litera a/b/c.\n")
+        for q in prof.SURVEY:
+            print(q["question"])
+            if q["options"]:
+                for key, (label, _pts) in q["options"].items():
+                    print(f"  {key}) {label}")
+                while True:
+                    choice = input("> ").strip().lower()
+                    if choice in q["options"]:
+                        answers[q["id"]] = choice
+                        break
+                    print("Wpisz " + "/".join(q["options"]))
+            else:
+                answers[q["id"]] = input("> ").strip()
+            print()
+
+    profile = prof.build_profile(args.user, answers, profiles_cfg,
+                                 display_name=args.name)
+    conn = connect(args.db)
+    init_db(conn)
+    prof.save_profile(conn, profile)
+    conn.close()
+    tol_pl = {"conservative": "ostrozny", "balanced": "zrownowazony",
+              "aggressive": "agresywny"}[profile["risk_tolerance"]]
+    print(f"Zapisano profil '{args.user}': {tol_pl}, "
+          f"strategia {profile['strategy']}, "
+          f"mnoznik ryzyka x{profile['risk_multiplier']}, "
+          f"max obsuniecie {profile['max_drawdown_pct']:.0%}, "
+          f"wykluczenia: {', '.join(profile['excluded_sectors']) or 'brak'}")
+    print("Profil zadziala przy nastepnym `signals --user "
+          f"{args.user}` (nowa ksiazka paper lub swiadome "
+          "--accept-config-change na istniejacej).")
+    return 0
+
+
 def cmd_regime(args) -> int:
     """Market-regime radar report (Phase 3; display only, ZERO decisions).
 
@@ -970,6 +1029,14 @@ def main(argv=None) -> int:
                    help="Market-regime radar: current state, flips, "
                         "false-alarm report (display only)")
 
+    srv = sub.add_parser("survey",
+                         help="Polish risk-profile survey -> user_profiles "
+                              "(deterministic mapping, ZERO LLM)")
+    srv.add_argument("--user", required=True, help="user id, e.g. kamil")
+    srv.add_argument("--name", default=None, help="display name")
+    srv.add_argument("--answers", default=None,
+                     help="non-interactive: a,b,c,d[,sector1,sector2|-]")
+
     args = parser.parse_args(argv)
     if args.command == "ingest":
         return cmd_ingest(args)
@@ -1005,6 +1072,8 @@ def main(argv=None) -> int:
         return cmd_web(args)
     if args.command == "regime":
         return cmd_regime(args)
+    if args.command == "survey":
+        return cmd_survey(args)
     return 1
 
 
